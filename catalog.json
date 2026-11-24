@@ -168,5 +168,16 @@
       "date": "2026-11-24T18:42:19Z",
       "note": "Adds optional proc chance annotations; unknown rates are omitted and scoring is unchanged."
     }
+  },
+  {
+    "id": "MiniMappin",
+    "name": "MiniMappin",
+    "category": "Interface",
+    "description": "Custom minimap layout and map tools.",
+    "features": [
+      "Square minimap",
+      "Configurable minimap appearance",
+      "Minimap icon management"
+    ]
   }
 ]
