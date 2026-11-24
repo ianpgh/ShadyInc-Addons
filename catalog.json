@@ -1,0 +1,93 @@
+[
+  {
+    "id": "EasyFollow",
+    "name": "EasyFollow",
+    "category": "Party tools",
+    "description": "Follow, inspect, sit and mount controls.",
+    "reference": {
+      "version": "1.7.4",
+      "date": "2026-11-24T17:10:56Z",
+      "note": "Independent visibility controls."
+    }
+  },
+  {
+    "id": "ActionHero",
+    "name": "Action Hero",
+    "category": "Interface",
+    "description": "Custom action bars, target health and combo points.",
+    "reference": {
+      "version": "2.0 Alpha 3",
+      "date": "2026-11-24T17:42:45Z",
+      "note": "Target indicators and HP options."
+    }
+  },
+  {
+    "id": "WritTracker",
+    "name": "Writ This",
+    "category": "Questing",
+    "description": "Writ costs, reputation, crates and tracking.",
+    "reference": {
+      "version": "4.0.0-beta.12",
+      "date": "2026-11-24T05:22:38Z",
+      "note": "Current quote coverage checks."
+    }
+  },
+  {
+    "id": "CampfireSongs",
+    "name": "Campfire Songs",
+    "category": "Utility",
+    "description": "Campfire, campsite buffs and sleeping bag timers.",
+    "reference": {
+      "version": "1.0.5",
+      "date": "2026-11-24T05:30:39Z",
+      "note": "Camp timers."
+    }
+  },
+  {
+    "id": "AuctionCompanion",
+    "name": "Auction Companion",
+    "category": "Auction",
+    "description": "Native auction searches, purchases, live scans and vendor prices.",
+    "reference": {
+      "version": "0.1.22",
+      "date": "2026-11-24T06:08:37Z",
+      "note": "Reference merchant prices."
+    }
+  },
+  {
+    "id": "BuffHero",
+    "name": "BuffHero",
+    "category": "Utility",
+    "description": "Buff reminders."
+  },
+  {
+    "id": "GrindTracker",
+    "name": "GrindTracker",
+    "category": "Tracking",
+    "description": "Loot, XP and dungeon session analytics."
+  },
+  {
+    "id": "ProfessionAIO",
+    "name": "Profession AIO",
+    "category": "Professions",
+    "description": "Combined crafting and reagent pricing."
+  },
+  {
+    "id": "ShadyFlightTimer",
+    "name": "Shady Flight Timer",
+    "category": "Utility",
+    "description": "Flight countdown and fare tracking."
+  },
+  {
+    "id": "ShadyIncAddonManager",
+    "name": "Shady Inc Addon Manager",
+    "category": "Interface",
+    "description": "In-game addon management."
+  },
+  {
+    "id": "ShadyPriceEngine",
+    "name": "Shady Price Engine",
+    "category": "Auction",
+    "description": "Price display and market data."
+  }
+]
