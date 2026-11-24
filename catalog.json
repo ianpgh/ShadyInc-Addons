@@ -150,5 +150,23 @@
       "Market price display",
       "Shared item price information"
     ]
+  },
+  {
+    "id": "StatGains",
+    "name": "Stat Gains",
+    "category": "Interface",
+    "description": "Class-aware item stat tooltips and side-by-side gear comparisons.",
+    "features": [
+      "Derived health, mana, attack power, armor and critical strike values",
+      "Shift-middle-click equipped vs candidate gear comparison",
+      "Class/spec scoring and optional Pawn integration",
+      "Optional Priest Meditation casting mana regeneration estimate",
+      "Optional proc chance annotations for known item effects"
+    ],
+    "reference": {
+      "version": "1.9.2",
+      "date": "2026-11-24T18:42:19Z",
+      "note": "Adds optional proc chance annotations; unknown rates are omitted and scoring is unchanged."
+    }
   }
 ]
