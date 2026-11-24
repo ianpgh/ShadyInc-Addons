@@ -1,0 +1,10 @@
+{
+  "addon": "AuctionCompanion",
+  "version": "0.1.22",
+  "url": "AuctionCompanion_v0.1.22.zip",
+  "sha256": "f38aa06595972b36a02d1deefcbaeb4bdabef47ea2acb16238fda10eba6f6466",
+  "published_at": "2026-11-24T06:08:37Z",
+  "changelog": [
+    "Adds reference vendor purchase prices; live observed merchant prices take priority."
+  ]
+}
