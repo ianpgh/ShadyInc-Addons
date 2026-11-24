@@ -1,0 +1,10 @@
+{
+  "addon": "BuffHero",
+  "version": "1.6.3",
+  "url": "BuffHero_v1.6.3.zip",
+  "sha256": "29702703f4e362766fc8e7c39ad52a8c189cc1a766641a290e48681cbe6e7786",
+  "published_at": "2026-11-24T06:52:52Z",
+  "changelog": [
+    "Minimap launcher and tooltip build."
+  ]
+}
