@@ -8,7 +8,13 @@
       "version": "1.7.4",
       "date": "2026-11-24T17:10:56Z",
       "note": "Independent visibility controls."
-    }
+    },
+    "features": [
+      "Follow and inspect party members",
+      "Sit and mount controls",
+      "Independent button visibility settings",
+      "Customizable button appearance"
+    ]
   },
   {
     "id": "ActionHero",
@@ -19,7 +25,13 @@
       "version": "2.0 Alpha 3",
       "date": "2026-11-24T17:42:45Z",
       "note": "Target indicators and HP options."
-    }
+    },
+    "features": [
+      "Five customizable action bars",
+      "Movable bars and layout profiles",
+      "Target health display and optional percentage",
+      "Target combo points for rogues and Cat Form druids"
+    ]
   },
   {
     "id": "WritTracker",
@@ -30,7 +42,13 @@
       "version": "4.0.0-beta.12",
       "date": "2026-11-24T05:22:38Z",
       "note": "Current quote coverage checks."
-    }
+    },
+    "features": [
+      "Track active writs and posted writs",
+      "Compare material costs and reputation rewards",
+      "Optional Auction Companion or Auctionator pricing",
+      "Track crates and writ sales"
+    ]
   },
   {
     "id": "CampfireSongs",
@@ -41,7 +59,13 @@
       "version": "1.0.5",
       "date": "2026-11-24T05:30:39Z",
       "note": "Camp timers."
-    }
+    },
+    "features": [
+      "Campfire expiration timers when known",
+      "Campsite buff and placement timers when known",
+      "Sleeping bag rest countdown",
+      "Live timer display"
+    ]
   },
   {
     "id": "AuctionCompanion",
@@ -52,42 +76,79 @@
       "version": "0.1.22",
       "date": "2026-11-24T06:08:37Z",
       "note": "Reference merchant prices."
-    }
+    },
+    "features": [
+      "Native auction house search and purchasing",
+      "Live scans for current auction prices",
+      "Vendor-aware purchase prices and item tooltips",
+      "Shared price data for compatible addons"
+    ]
   },
   {
     "id": "BuffHero",
     "name": "BuffHero",
     "category": "Utility",
-    "description": "Buff reminders."
+    "description": "Buff reminders.",
+    "features": [
+      "Configurable buff reminders",
+      "Food and weapon oil reminders",
+      "Minimap launcher and tooltip"
+    ]
   },
   {
     "id": "GrindTracker",
     "name": "GrindTracker",
     "category": "Tracking",
-    "description": "Loot, XP and dungeon session analytics."
+    "description": "Loot, XP and dungeon session analytics.",
+    "features": [
+      "Track loot, gold and experience during sessions",
+      "Dungeon run tracking and analytics",
+      "Session history and notes",
+      "Optional Auction Companion price integration"
+    ]
   },
   {
     "id": "ProfessionAIO",
     "name": "Profession AIO",
     "category": "Professions",
-    "description": "Combined crafting and reagent pricing."
+    "description": "Combined crafting and reagent pricing.",
+    "features": [
+      "Combined tailoring, enchanting and cooking tools",
+      "Crafting cost and profitability comparisons",
+      "Reagent auction searches and pricing",
+      "Trainer and vendor information"
+    ]
   },
   {
     "id": "ShadyFlightTimer",
     "name": "Shady Flight Timer",
     "category": "Utility",
-    "description": "Flight countdown and fare tracking."
+    "description": "Flight countdown and fare tracking.",
+    "features": [
+      "Flight destination and countdown",
+      "Route duration estimates",
+      "Flight fare tracking"
+    ]
   },
   {
     "id": "ShadyIncAddonManager",
     "name": "Shady Inc Addon Manager",
     "category": "Interface",
-    "description": "In-game addon management."
+    "description": "In-game addon management.",
+    "features": [
+      "In-game addon management",
+      "Central addon interface"
+    ]
   },
   {
     "id": "ShadyPriceEngine",
     "name": "Shady Price Engine",
     "category": "Auction",
-    "description": "Price display and market data."
+    "description": "Price display and market data.",
+    "features": [
+      "Auction and vendor price tooltips",
+      "Market price display",
+      "Shared item price information"
+    ]
   }
 ]
