@@ -1,0 +1,10 @@
+{
+  "addon": "ShadyFlightTimer",
+  "version": "1.4.0",
+  "url": "ShadyFlightTimer_v1.4.0.zip",
+  "sha256": "33f888aeddb12636adad5a0d1255e3bc0859d29098771b4946783c6fdde23f92",
+  "published_at": "2026-11-24T05:42:42Z",
+  "changelog": [
+    "Flight countdown, route estimates, fare tracking and illustrated display options."
+  ]
+}
