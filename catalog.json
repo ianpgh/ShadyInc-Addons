@@ -179,5 +179,12 @@
       "Configurable minimap appearance",
       "Minimap icon management"
     ]
+  },
+  {
+    "category": "Utility",
+    "description": "Listed, sales, buy history, reversible deletion, expired/repost tracking, unique listing counts, live history search, per-tab sorting, optional Shady Search shortcut; AC vendor-list scanner; optional Auctionator fallback.",
+    "features": [],
+    "id": "AuctionPeek",
+    "name": "Auction Peek"
   }
 ]
