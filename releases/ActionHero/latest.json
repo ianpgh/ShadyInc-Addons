@@ -1,6 +1,7 @@
 {
   "addon": "ActionHero",
-  "version": "2.1.2",
-  "url": "ActionHero_v2.1.2.zip",
-  "sha256": "c4ab6be207aa138b05084552a7dc23072430eec17c27357900b9a8b3894a243c"
+  "published_at": "2026-11-25T20:22:12Z",
+  "sha256": "7bf0a6d72bcdc598a676e6f2d154f8ee90677b2eed61022ace3c1a4b98dffca5",
+  "url": "ActionHero_v2.2.0.zip",
+  "version": "2.2.0"
 }
