@@ -193,5 +193,12 @@
     "features": [],
     "id": "HideThisManager",
     "name": "HideThisManager"
+  },
+  {
+    "category": "Utility",
+    "description": "Saved custom pins and graveyards on the world map.",
+    "features": [],
+    "id": "PinMe",
+    "name": "Pin Me"
   }
 ]
