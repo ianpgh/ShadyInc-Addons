@@ -1,10 +1,6 @@
 {
   "addon": "ProfessionAIO",
-  "version": "1.1.43",
-  "url": "ProfessionAIO_v1.1.43.zip",
-  "sha256": "86cb2aaef0db21db0ded09e4d55adf0faa54aa2525c1a2c413306bdc6c238948",
-  "published_at": "2026-11-24T13:43:32Z",
-  "changelog": [
-    "Combined tailoring, cooking, enchanting and fishing tools."
-  ]
+  "version": "1.1.44",
+  "url": "ProfessionAIO_v1.1.44.zip",
+  "sha256": "c7e15edf2646a4110771d16e10caeba49b43db22bef610d813ef4dbd66883668"
 }
