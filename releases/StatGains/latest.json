@@ -1,11 +1,6 @@
 {
   "addon": "StatGains",
-  "version": "1.9.2",
-  "url": "StatGains_v1.9.2.zip",
-  "sha256": "b5ecd068c70d6da552519a425d69f9af0508045262756c305530c19c7ab0a6cd",
-  "published_at": "2026-11-24T18:42:19Z",
-  "changelog": [
-    "Adds optional proc chance annotations for explicit and known WoW Forever item effect rates.",
-    "Unknown or ambiguous proc rates are omitted; comparison scores are unchanged."
-  ]
+  "version": "1.9.3",
+  "url": "StatGains_v1.9.3.zip",
+  "sha256": "210b9d80eb9be4d9dffa9a2a2961cb9400d690602fa0d28492596d6459b6029d"
 }
