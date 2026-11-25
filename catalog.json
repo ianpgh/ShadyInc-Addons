@@ -186,5 +186,12 @@
     "features": [],
     "id": "AuctionPeek",
     "name": "Auction Peek"
+  },
+  {
+    "category": "Utility",
+    "description": "Tabbed Blizzard UI controls with movable new-mail icon and optional solid background.",
+    "features": [],
+    "id": "HideThisManager",
+    "name": "HideThisManager"
   }
 ]
