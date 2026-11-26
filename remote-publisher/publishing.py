@@ -134,13 +134,83 @@ def compile_lua(files, compiler="/usr/bin/luac5.1"):
                 raise Rejected("Lua 5.1 compilation failed. " + detail)
 
 
+
+MANAGER = "ShadyDesktopManager"
+MANAGER_PREFIX = "releases/" + MANAGER + "/"
+
+
+def manager_fields(fields):
+    require(isinstance(fields, dict) and set(fields) == {"manager", "version", "url", "sha256"}
+            and fields["manager"] == MANAGER, "Invalid manager manifest.")
+    release = fields["version"]
+    require(isinstance(release, str) and re.fullmatch(r"(?:0|[1-9][0-9]{0,5})\.(?:0|[1-9][0-9]{0,5})\.(?:0|[1-9][0-9]{0,5})", release),
+            "Invalid manager version.")
+    require(fields["url"] == f"ShadyAddonManager_{release}_windows_amd64.exe",
+            "Invalid manager executable filename.")
+    require(isinstance(fields["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", fields["sha256"]),
+            "Invalid manager checksum.")
+    return fields
+
+
+def manager_archive(archive, selected):
+    require(selected in ("auto", "stable"), "Manager updates use the stable channel.")
+    entries = archive.infolist()
+    require(len(entries) == 3, "Manager ZIP must contain exactly three files.")
+    names = [entry.orig_filename for entry in entries]
+    require(len(set(names)) == 3 and MANAGER_PREFIX + "latest.json" in names and "UPLOAD.txt" in names,
+            "Invalid manager ZIP layout.")
+    for entry in entries:
+        require(not entry.is_dir() and stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG),
+                "Manager ZIP contains a special file.")
+        require(not (entry.flag_bits & 1) and entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED),
+                "Unsupported manager ZIP compression or encryption.")
+        limit = LIMIT if entry.orig_filename.endswith(".exe") else 16384
+        require(0 < entry.file_size <= limit and entry.file_size <= max(1048576, entry.compress_size * 250),
+                "Manager ZIP member size is invalid.")
+    fields = manager_fields(json.loads(archive.read(MANAGER_PREFIX + "latest.json")))
+    require(set(names) == {MANAGER_PREFIX + "latest.json", MANAGER_PREFIX + fields["url"], "UPLOAD.txt"},
+            "Unexpected manager ZIP member.")
+    executable = archive.read(MANAGER_PREFIX + fields["url"])
+    require(digest(executable) == fields["sha256"], "Manager executable checksum mismatch.")
+    require(len(executable) >= 64 and executable[:2] == b"MZ", "Invalid Windows executable.")
+    offset = int.from_bytes(executable[60:64], "little")
+    require(64 <= offset <= len(executable) - 26 and executable[offset:offset+6] == b"PE\x00\x00\x64\x86"
+            and executable[offset+24:offset+26] == b"\x0b\x02", "Expected a Windows x64 PE executable.")
+    archive.read("UPLOAD.txt")
+    return fields, executable
+
+
+def manager_plan(work, package):
+    folder = release_dir(work, MANAGER)
+    current = manifest(folder, "latest.json")
+    fields = manager_fields(package["managerFields"])
+    incoming = version(fields["version"])[1]
+    require(not current or incoming > version(current["version"])[1], "Manager version must be newer than current.")
+    target = folder / fields["url"]
+    require(not target.exists() and not target.is_symlink(), "Manager executable already exists.")
+    if folder.exists():
+        for asset in folder.glob("ShadyAddonManager_*_windows_amd64.exe"):
+            old = asset.name[len("ShadyAddonManager_"):-len("_windows_amd64.exe")]
+            try:
+                channel, parts = version(old)
+            except Rejected:
+                continue
+            require(incoming > parts, "Manager version must be newer than release history.")
+    return folder, current
+
+
 def inspect(data, selected="auto", compiler="/usr/bin/luac5.1"):
     require(0 < len(data) <= LIMIT, "ZIP exceeds 32 MiB or is empty.")
     require(data.startswith(b"PK\x03\x04"), "Expected a standard ZIP archive.")
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            if MANAGER_PREFIX + "latest.json" in archive.namelist():
+                fields, _ = manager_archive(archive, selected)
+                return {"addon": MANAGER, "name": "Desktop Manager Update", "version": fields["version"],
+                        "channel": "stable", "size": len(data), "sha256": digest(data), "url": fields["url"],
+                        "managerFields": fields, "description": "", "features": [], "changelog": [], "warnings": []}
             addon, files = archive_files(archive)
-    except (zipfile.BadZipFile, RuntimeError, UnicodeError, EOFError, OSError) as exc:
+    except (zipfile.BadZipFile, RuntimeError, UnicodeError, EOFError, OSError, json.JSONDecodeError) as exc:
         raise Rejected("ZIP structure or checksum is invalid.") from exc
     require(valid_id(addon), "Invalid addon ID.")
     main = f"{addon}/{addon}.toc"
@@ -226,7 +296,7 @@ def write_json(path, data):
 
 
 def release_dir(work, addon):
-    require(valid_id(addon), "Invalid addon ID.")
+    require(addon == MANAGER or valid_id(addon), "Invalid addon ID.")
     root = work / "releases"
     folder = root / addon
     require(root.is_dir() and not root.is_symlink() and not folder.is_symlink(), "Unsafe repository layout.")
@@ -244,6 +314,12 @@ def manifest(folder, filename, optional=True):
 
 
 def check_manifest(folder, data):
+    if folder.name == MANAGER:
+        fields = manager_fields(data)
+        asset = folder / fields["url"]
+        require(not asset.is_symlink() and asset.is_file() and asset.stat().st_size <= LIMIT
+                and digest(asset.read_bytes()) == fields["sha256"], "Published manager checksum mismatch.")
+        return fields
     require(isinstance(data, dict) and data.get("addon") == folder.name, "Invalid current manifest.")
     version(data.get("version", ""))
     url = data.get("url", "")
@@ -292,6 +368,11 @@ def plan(work, package):
 
 
 def preview(work, package):
+    if package["addon"] == MANAGER:
+        _, current = manager_plan(work, package)
+        live = current["version"] if current else None
+        return {**package, "current": live, "publicStable": live,
+                "destination": MANAGER_PREFIX + "latest.json", "catalogChange": False}
     _, filename, latest, current, catalog = plan(work, package)
     addon = package["addon"]
     return {**package, "current": current["version"] if current else None,
@@ -302,6 +383,17 @@ def preview(work, package):
 
 
 def apply(work, package, data):
+    if package["addon"] == MANAGER:
+        folder, _ = manager_plan(work, package)
+        require(digest(data) == package["sha256"], "Manager ZIP changed after validation.")
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            fields, executable = manager_archive(archive, "stable")
+        require(fields == package["managerFields"], "Manager manifest changed.")
+        folder.mkdir(exist_ok=True)
+        target = folder / fields["url"]
+        target.write_bytes(executable)
+        write_json(folder / "latest.json", fields)
+        return fields, [target, folder / "latest.json"]
     folder, filename, latest, _, catalog = plan(work, package)
     folder.mkdir(exist_ok=True)
     addon, channel = package["addon"], package["channel"]
@@ -360,7 +452,7 @@ def verify_public(addon, filename, fields, sha):
         require(current == fields, "The published manifest has not propagated or has been superseded.")
         with urlopen(f"{address}/{asset_path}{stamp}", timeout=8) as response:
             require(digest(response.read(LIMIT + 1)) == fields["sha256"], "Public download checksum differs.")
-    if filename == "latest.json":
+    if filename == "latest.json" and addon != MANAGER:
         with urlopen(f"{PAGES}/catalog.json{stamp}", timeout=8) as response:
             catalog = json.loads(response.read(1024 * 1024))
         require(any(row["id"] == addon for row in catalog), "Public catalog has not propagated.")

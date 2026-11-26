@@ -123,7 +123,7 @@ function render() {
     if (item.preview) {
       const review = item.preview;
       heading.textContent = review.name + " · " + review.version;
-      row.append(text("p", review.addon + " · " + review.channel + " · Current channel version " + (review.current || "none")));
+      row.append(text("p", (review.addon === "ShadyDesktopManager" ? "Manager Update" : review.addon + " · " + review.channel) + " · Current version " + (review.current || "none")));
       row.append(text("p", "Destination " + review.destination + " · Catalog " + (review.catalogChange ? "update expected" : "unchanged")));
       for (const note of [...review.changelog, ...review.features]) row.append(text("p", "• " + note));
       for (const warning of review.warnings) row.append(text("p", "⚠ " + warning, "warn"));

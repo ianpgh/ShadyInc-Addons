@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from publishing import (
-    CHANNELS, LIMIT, Rejected, apply, check_manifest, checkout, commit_push,
+    CHANNELS, LIMIT, MANAGER, Rejected, apply, check_manifest, checkout, commit_push,
     digest, git, inspect, manifest, preview, release_dir, require, valid_id, verify_public, version,
 )
 
@@ -212,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
         return {**result, "ticket": ticket}
 
     def receipt(self, fields, filename, sha, pushed):
-        response = {"addon": fields["addon"], "version": fields["version"],
+        response = {"addon": fields.get("addon", fields.get("manager")), "version": fields["version"],
                     "channel": version(fields["version"])[0], "manifest": filename, "sha": sha,
                     "link": COMMIT_URL + sha}
         audit("mutation", "accepted" if pushed else "unconfirmed", **response)
@@ -245,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
         addon = data["addon"]
         channel = data["channel"]
         sha = data["sha"]
-        require(valid_id(addon) and channel in CHANNELS and SHA.fullmatch(sha), "Invalid release reference.")
+        require((valid_id(addon) or (addon == MANAGER and channel == "stable")) and channel in CHANNELS and SHA.fullmatch(sha), "Invalid release reference.")
         return addon, channel, sha
 
     def historical(self, work, addon, filename, sha):
@@ -268,6 +268,7 @@ class Handler(BaseHTTPRequestHandler):
     @bounded
     def rollback(self, session):
         addon, channel, prior_sha = self.read_operation()
+        require(addon != MANAGER, "Manager rollback is not supported.")
         require(self.headers.get("X-Release-Confirmation") == "rollback", "Explicit rollback confirmation required.")
         filename = CHANNELS[channel]
         require(WRITER.acquire(blocking=False), "Another publish is in progress.")
