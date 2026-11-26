@@ -1,7 +1,7 @@
 {
   "addon": "ProfessionAIO",
-  "published_at": "2026-11-25T19:46:59Z",
-  "sha256": "90734e27f235b762465ae7de8c4ada6405646b56e87ca75ec8eb81b155bee799",
-  "url": "ProfessionAIO_v1.2.0.zip",
-  "version": "1.2.0"
+  "version": "1.2.1",
+  "url": "ProfessionAIO_v1.2.1.zip",
+  "sha256": "1a5a23af786e29f48aec973f06cd7f0846510652635d38ec2d2deebb08ff24e6",
+  "published_at": "2026-11-26T07:25:17Z"
 }
