@@ -200,5 +200,12 @@
     "features": [],
     "id": "PinMe",
     "name": "Pin Me"
+  },
+  {
+    "id": "DebuffHero",
+    "name": "Debuff Hero",
+    "category": "Utility",
+    "description": "Customize native enemy nameplate debuffs.",
+    "features": []
   }
 ]
