@@ -207,5 +207,12 @@
     "category": "Utility",
     "description": "Customize native enemy nameplate debuffs.",
     "features": []
+  },
+  {
+    "id": "BagnonHide",
+    "name": "Bagnon Hide",
+    "category": "Utility",
+    "description": "Alt-middle-click to track; Shift-middle-click to hide; middle-click to disenchant; Shift-left-click to link, search or delete; Show Hidden count, right-click highlight color/intensity.",
+    "features": []
   }
 ]
