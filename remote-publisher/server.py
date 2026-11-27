@@ -28,6 +28,8 @@ CLIENT = os.getenv("GITHUB_CLIENT_ID", "")
 SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
 OWNER = 191883860
 SESSION_TTL = 1800
+STORE = None
+PERSISTENT_TTL = 90 * 86400
 WEB = Path(__file__).with_name("web")
 ASSETS = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
           "/style.css": ("style.css", "text/css"), "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
@@ -40,7 +42,7 @@ REPO_OPERATION = BoundedSemaphore(2)
 WRITER = Lock()
 SHA = re.compile(r"[0-9a-f]{40}")
 CHECKSUM = re.compile(r"[0-9a-f]{64}")
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 COMMIT_URL = "https://github.com/ianpgh/ShadyInc-Addons/commit/"
 
 
@@ -97,6 +99,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Strict-Transport-Security", "max-age=31536000")
+        if getattr(self, "renew_cookie", False) and "Set_Cookie" not in headers:
+            self.send_header("Set-Cookie", f"__Host-session={self.cookie('__Host-session')}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={PERSISTENT_TTL}")
         for key, value in headers.items():
             self.send_header(key.replace("_", "-"), value)
         self.end_headers()
@@ -122,10 +126,27 @@ class Handler(BaseHTTPRequestHandler):
                     table.pop(key)
 
     def require_active(self, session):
-        require(self.session() is session, "Session expired. Sign in again before publishing.")
+        active = self.session()
+        require(active and hmac.compare_digest(active["csrf"], session["csrf"]) if STORE is not None
+                else active is session, "Session expired. Sign in again before publishing.")
+        if STORE is not None:
+            session["token"] = active["token"]
 
     def session(self):
         sid = self.cookie("__Host-session")
+        if STORE is not None:
+            active, renewed = self.store_call(STORE.load, sid, self.refresh_credentials)
+            if renewed:
+                self.renew_cookie = True
+            if not active:
+                return None
+            with GUARD:
+                self.prune()
+                # Validation tickets deliberately remain process-local and require revalidation after restart.
+                cached = SESSIONS.setdefault(sid, {"tickets": {}, "expires": time.monotonic() + SESSION_TTL})
+                cached["expires"] = time.monotonic() + SESSION_TTL
+                active["tickets"] = cached["tickets"]
+            return active
         with GUARD:
             self.prune()
             return SESSIONS.get(sid)
@@ -156,14 +177,12 @@ class Handler(BaseHTTPRequestHandler):
                        "redirect_uri": ORIGIN + "/oauth/callback", "code_verifier": pending["verifier"]})
         token = auth.get("access_token")
         require(token and 0 < auth.get("expires_in", 0) <= 28800, "The GitHub App must issue expiring tokens.")
-        user = github("https://api.github.com/user", token=token)
-        require(user.get("id") == OWNER, "This GitHub account is not authorized.")
-        repos = github("https://api.github.com/user/installations", token=token)
-        require(len(repos.get("installations", [])) == 1, "Install this private GitHub App on the addon repository.")
-        installation = repos["installations"][0]["id"]
-        allowed = github(f"https://api.github.com/user/installations/{installation}/repositories", token=token)
-        require(allowed.get("total_count") == 1 and allowed["repositories"][0]["id"] == 1470523949,
-                "The GitHub App installation must select only ShadyInc-Addons.")
+        self.check_owner(token)
+        if STORE is not None:
+            sid = secrets.token_urlsafe(32)
+            self.store_call(STORE.create, sid, self.cookie("__Host-session"), auth, secrets.token_urlsafe(32))
+            self.redirect("/", "session", sid, PERSISTENT_TTL)
+            return
         ttl = min(SESSION_TTL, auth["expires_in"])
         sid = secrets.token_urlsafe(32)
         with GUARD:
@@ -172,6 +191,37 @@ class Handler(BaseHTTPRequestHandler):
             SESSIONS[sid] = {"expires": time.monotonic() + ttl, "token": token,
                              "csrf": secrets.token_urlsafe(32), "tickets": {}}
         self.redirect("/", "session", sid, ttl)
+
+    @staticmethod
+    def check_owner(token):
+        user = github("https://api.github.com/user", token=token)
+        require(user.get("id") == OWNER, "This GitHub account is not authorized.")
+        repos = github("https://api.github.com/user/installations", token=token)
+        require(len(repos.get("installations", [])) == 1, "Install this private GitHub App on the addon repository.")
+        installation = repos["installations"][0]["id"]
+        allowed = github(f"https://api.github.com/user/installations/{installation}/repositories", token=token)
+        require(allowed.get("total_count") == 1 and allowed["repositories"][0]["id"] == 1470523949,
+                "The GitHub App installation must select only ShadyInc-Addons.")
+
+    def refresh_credentials(self, refresh):
+        auth = github("https://github.com/login/oauth/access_token",
+                      {"client_id": CLIENT, "client_secret": SECRET,
+                       "grant_type": "refresh_token", "refresh_token": refresh})
+        if auth.get("error") in {"bad_refresh_token", "invalid_grant", "expired_token"}:
+            return None
+        require(auth.get("access_token"), "GitHub credential renewal unavailable. Retry shortly.")
+        return auth
+
+    @staticmethod
+    def store_call(method, *args):
+        try:
+            return method(*args)
+        except Rejected:
+            raise
+        except Exception as exc:
+            # Never return or log connection strings or credentials.
+            audit("session_store", "unavailable", error=type(exc).__name__)
+            raise OSError("Session storage temporarily unavailable.") from None
 
     def read_body(self, limit, mime):
         require(not self.headers.get("Transfer-Encoding") and len(self.headers.get_all("Content-Length", [])) == 1,
@@ -424,6 +474,8 @@ class Handler(BaseHTTPRequestHandler):
                     not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), session["csrf"])):
                 return self.json(403, {"error": "Invalid request origin or session proof."})
             if path == "/api/logout":
+                if STORE is not None:
+                    self.store_call(STORE.delete, self.cookie("__Host-session"))
                 with GUARD:
                     SESSIONS.pop(self.cookie("__Host-session"), None)
                 return self.send(204, Set_Cookie="__Host-session=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0")
@@ -469,4 +521,13 @@ class HTTPServer(ThreadingHTTPServer):
 if __name__ == "__main__":
     if ORIGIN and not re.fullmatch(r"https://[a-zA-Z0-9.-]+(?::[0-9]+)?", ORIGIN):
         raise SystemExit("PUBLIC_ORIGIN must be a bare HTTPS origin.")
+    if ORIGIN and CLIENT and SECRET:
+        from session_store import SessionStore
+        try:
+            STORE = SessionStore(os.environ["DATABASE_URL"], os.environ["SESSION_ENCRYPTION_KEY"])
+            STORE.initialize()
+        except Exception as exc:
+            audit("session_store", "startup_failed", error=type(exc).__name__)
+            raise SystemExit("Persistent session storage configuration or connection failed.") from None
+        audit("session_store", "ready")
     HTTPServer(("0.0.0.0", int(os.getenv("PORT", 8080))), Handler).serve_forever()

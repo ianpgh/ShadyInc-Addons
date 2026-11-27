@@ -11,12 +11,12 @@
 <title>Shady Remote Publisher</title>
 </head>
 <body><main>
-<header><img src="/icon.png" width="50" height="50" alt=""><div><h1>Shady Remote Publisher</h1><p>WoW Forever · v1.1.0</p></div></header>
+<header><img src="/icon.png" width="50" height="50" alt=""><div><h1>Shady Remote Publisher</h1><p>WoW Forever · v1.2.0</p></div></header>
 <nav aria-label="Repository"><p id="connection" role="status">○ Checking connection</p><a id="login" href="/login" hidden>Sign in with GitHub</a><button id="logout" hidden>Sign out</button><button id="refresh" hidden>Refresh Repository</button></nav>
 <div id="workspace" hidden>
 <section id="drop" aria-labelledby="upload-title"><h2 id="upload-title">Upload addon ZIPs</h2><p>Drop ZIPs here or choose them from Files. Up to 32 MiB per package.</p><input id="files" type="file" accept=".zip,application/zip" multiple hidden><button id="browse" class="primary">Browse Files</button></section>
 <section aria-labelledby="queue-title"><div class="section-head"><h2 id="queue-title">Upload queue</h2><span id="count"></span></div><div class="actions"><button id="selected">Publish Selected</button><button id="all" class="primary">Publish All Validated</button></div><p id="publication-progress" class="sr-only" role="status" aria-live="polite"></p><ol id="queue"></ol><p id="empty">Choose a ZIP to get started.</p></section>
-<section aria-labelledby="history-title"><h2 id="history-title">Release history <small>Eastern time</small></h2><p id="history-state"></p><ol id="history"></ol></section>
+<section aria-labelledby="history-title"><details><summary id="history-title">Recently Published / Release history · Eastern time</summary><p id="history-state"></p><ol id="history"></ol></details></section>
 </div>
 <p id="notice" role="status" aria-live="polite"></p>
 <footer>RIP Shady</footer>

@@ -4,7 +4,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && /usr/bin/luac5.1 -v
 WORKDIR /app
-COPY publishing.py server.py ./
+RUN pip install --no-cache-dir 'psycopg[binary]>=3.2,<4' 'cryptography>=44,<48'
+COPY publishing.py server.py session_store.py ./
 COPY web ./web
 ENV PYTHONDONTWRITEBYTECODE=1 PORT=8080
 USER 65534:65534

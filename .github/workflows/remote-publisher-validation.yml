@@ -1,0 +1,31 @@
+name: Remote Publisher validation
+on:
+  push:
+    branches: ['feature/shady-remote-publisher-v1.2']
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test-only-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y lua5.1
+      - run: pip install 'psycopg[binary]>=3.2,<4' 'cryptography>=44,<48'
+      - run: python tests.py && python session_store_tests.py && node --check web/app.js
+        working-directory: remote-publisher
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:test-only-password@localhost:5432/postgres

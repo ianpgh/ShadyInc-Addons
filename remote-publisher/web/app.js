@@ -153,10 +153,10 @@ function render() {
     if (item.publication) {
       if (item.commit) actions.append(link("View GitHub Commit", item.commit));
       if (item.download) actions.append(link("View Published Release", item.download));
-      actions.append(button("Verify Publication", () => run(() => verify(item)), busy));
+      actions.append(button("Verify Publication", () => run(async () => { await verify(item); if (session) await refresh(); }), busy));
     }
     if (!item.publication || item.retryable) {
-      actions.append(button(item.publication ? "Validate Again" : "Validate Package", () => run(() => validate(item)), busy));
+      actions.append(button(item.publication ? "Retry · Validate Again" : "Validate Package", () => run(() => validate(item)), busy));
     }
     actions.append(button("Remove From Queue", () => {
       queue.splice(queue.indexOf(item), 1);
@@ -243,7 +243,17 @@ async function verify(item, automatic = false, publishError = "") {
     }
     item.retryable = result.retryable === true;
     updatePublication(item, result.status, result.detail);
-    if (result.status === "published" || result.status === "failed" || !session ||
+    if (result.status === "published") {
+      setTimeout(() => {
+        const index = queue.indexOf(item);
+        if (index !== -1 && item.status === "published") {
+          queue.splice(index, 1);
+          render();
+        }
+      }, 3000);
+      return;
+    }
+    if (result.status === "failed" || !session ||
         (result.status === "partial" && (item.retryable || !automatic))) return;
   }
 }
