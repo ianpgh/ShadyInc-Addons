@@ -1,12 +1,15 @@
 """Isolated tests. No test writes to GitHub or contacts production."""
 import io
+import json
 from email.message import Message
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from threading import Thread
@@ -171,6 +174,145 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(pub.git(work, "rev-parse", "HEAD"), original)
             self.assertFalse((work / "releases/Fixture/latest.json").exists())
 
+    def test_resume_asset_or_manifest_for_each_channel(self):
+        for release, addon, missing in (
+            ("2.0.0", "StableFixture", "metadata"),
+            ("2.0 Alpha 3", "AlphaFixture", "asset"),
+            ("2.0.0-beta.1", "BetaFixture", "metadata"),
+        ):
+            with self.subTest(release=release), pub.checkout(self.remote) as work:
+                data = package(release, addon=addon)
+                parsed = inspect(data)
+                fields = pub.release_reference(parsed)
+                filename = pub.CHANNELS[parsed["channel"]]
+                folder = pub.release_dir(work, addon)
+                folder.mkdir()
+                if missing == "metadata":
+                    (folder / parsed["url"]).write_bytes(data)
+                    expected = {filename, "catalog.json"}
+                else:
+                    pub.write_json(folder / filename, fields)
+                    expected = {parsed["url"], "catalog.json"}
+
+                pub.preview(work, parsed, resume=True)
+                _, paths = pub.apply(work, parsed, data, resume=True)
+                self.assertEqual({path.name for path in paths}, expected)
+                self.assertTrue(server.complete(pub.publication_state(work, fields, filename)))
+                self.assertEqual((folder / parsed["url"]).read_bytes(), data)
+                self.assertEqual(pub.apply(work, parsed, data, resume=True)[1], [])
+
+    def test_desktop_manager_package_keeps_executable_and_manifest_format(self):
+        executable = bytearray(96)
+        executable[:2] = b"MZ"
+        executable[60:64] = (64).to_bytes(4, "little")
+        executable[64:70] = b"PE\x00\x00\x64\x86"
+        executable[88:90] = b"\x0b\x02"
+        fields = {"manager": pub.MANAGER, "version": "2.0.0", "sha256": pub.digest(executable),
+                  "url": "ShadyAddonManager_2.0.0_windows_amd64.exe"}
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w") as archive:
+            archive.writestr(pub.MANAGER_PREFIX + "latest.json", json.dumps(fields))
+            archive.writestr(pub.MANAGER_PREFIX + fields["url"], bytes(executable))
+            archive.writestr("UPLOAD.txt", "Manager update")
+        data = archive_bytes.getvalue()
+        parsed = inspect(data)
+        with pub.checkout(self.remote) as work:
+            result, paths = pub.apply(work, parsed, data, resume=True)
+            self.assertEqual(result, fields)
+            self.assertEqual({path.name for path in paths}, {fields["url"], "latest.json"})
+            self.assertTrue(server.complete(pub.publication_state(work, fields, "latest.json")))
+            self.assertEqual(pub.apply(work, parsed, data, resume=True)[1], [])
+
+    def test_resume_refuses_conflicting_bytes_and_retained_rollback_asset(self):
+        old = self.publish_local("1.0.0")
+        data = package("2.0.0")
+        parsed = inspect(data)
+        with pub.checkout(self.remote) as work:
+            _, paths = pub.apply(work, parsed, data)
+            self.assertTrue(pub.commit_push(work, paths, "Publish Fixture 2.0.0")[1])
+        with pub.checkout(self.remote, full=True) as work:
+            path = work / "releases/Fixture/latest.json"
+            path.write_bytes(pub.git(work, "show", f"{old}:releases/Fixture/latest.json"))
+            self.assertTrue(pub.commit_push(work, [path], "Rollback Fixture 1.0.0")[1])
+        with pub.checkout(self.remote) as work:
+            with self.assertRaisesRegex(pub.Rejected, "previously published"):
+                pub.preview(work, parsed, resume=True)
+            different = inspect(package("2.0.0", lua="return false"))
+            with self.assertRaisesRegex(pub.Rejected, "different.*bytes"):
+                pub.preview(work, different, resume=True)
+
+    def test_publish_reconciles_timeout_after_push_without_extra_commit(self):
+        self.exercise_uncertain_push(pushed_before_timeout=True)
+
+    def test_publish_retries_timeout_before_push_and_commits_once(self):
+        self.exercise_uncertain_push(pushed_before_timeout=False)
+
+    def exercise_uncertain_push(self, pushed_before_timeout):
+        data = package("2.0.0")
+        handler = server.Handler.__new__(server.Handler)
+        handler.headers = {"X-Validation-Ticket": "ticket", "X-Release-Confirmation": "publish"}
+        handler.read_body = Mock(return_value=data)
+        handler.require_active = Mock()
+        session = {"tickets": {"ticket": (pub.digest(data), "auto", None, None)}, "token": "test"}
+        original_git = pub.git
+        pushes = []
+
+        def interrupted(work, *args, **kwargs):
+            if args[0] == "push":
+                pushes.append(args)
+                if len(pushes) == 1:
+                    if pushed_before_timeout:
+                        original_git(work, *args, **kwargs)
+                    raise subprocess.TimeoutExpired("git push", 90)
+            return original_git(work, *args, **kwargs)
+
+        with (patch.object(server, "checkout", side_effect=lambda: pub.checkout(self.remote)),
+              patch.object(server, "inspect", side_effect=inspect),
+              patch.object(pub, "git", side_effect=interrupted),
+              patch.object(server.time, "sleep")):
+            receipt = handler.publish(session)
+            self.assertEqual(receipt["status"], "verification_pending")
+            with self.assertRaisesRegex(pub.Rejected, "Validate these exact ZIP bytes"):
+                handler.publish(session)
+            self.assertTrue(handler.validate(session)["alreadyPublished"])
+        with pub.checkout(self.remote, full=True) as work:
+            self.assertEqual(pub.git(work, "rev-list", "--count", "HEAD").strip(), b"2")
+            self.assertEqual(pub.git(work, "rev-parse", "HEAD").decode().strip(), receipt["sha"])
+        self.assertEqual(len(pushes), 1 if pushed_before_timeout else 2)
+
+    def test_verification_without_push_receipt_and_public_propagation(self):
+        data = package("2.0.0-beta.1")
+        parsed = inspect(data)
+        fields = pub.release_reference(parsed)
+        handler = server.Handler.__new__(server.Handler)
+        handler.read_body = Mock(return_value=json.dumps({**fields, "channel": "beta"}).encode())
+        with (patch.object(server, "checkout", side_effect=lambda: pub.checkout(self.remote)),
+              patch.object(server, "verify_public") as public):
+            self.assertEqual(handler.verify_publication()["status"], "absent")
+            public.assert_not_called()
+            with pub.checkout(self.remote) as work:
+                written_fields, paths = pub.apply(work, parsed, data)
+                sha, pushed = pub.commit_push(work, paths, "Publish Fixture 2.0.0-beta.1")
+                self.assertTrue(pushed)
+            public.side_effect = pub.Rejected("GitHub Pages: version metadata differs.")
+            partial = handler.verify_publication()
+            self.assertEqual(partial["status"], "partial")
+            self.assertFalse(partial["retryable"])
+            self.assertIn("GitHub Pages", partial["detail"])
+            public.side_effect = None
+            public.return_value = "https://example.org/download.zip"
+            self.assertEqual(handler.verify_publication()["status"], "published")
+            public.assert_called_with("Fixture", "beta.json", written_fields, sha, catalog_required=True)
+
+    def test_verification_unavailable_and_in_progress_are_inconclusive(self):
+        handler = server.Handler.__new__(server.Handler)
+        handler.read_body = Mock(return_value=json.dumps(
+            {"addon": "Fixture", "channel": "stable", "version": "2.0.0", "sha256": "a" * 64}).encode())
+        with server.WRITER:
+            self.assertEqual(handler.verify_publication()["status"], "publishing")
+        with patch.object(server, "checkout", side_effect=TimeoutError):
+            self.assertEqual(handler.verify_publication()["status"], "verifying")
+
     def test_atomic_rollback_preserves_assets(self):
         old = self.publish_local("1.0.0")
         self.publish_local("2.0.0")
@@ -185,6 +327,40 @@ class RepositoryTests(unittest.TestCase):
         with pub.checkout(self.remote) as work:
             self.assertEqual(pub.manifest(work / "releases/Fixture", "latest.json")["version"], "1.0.0")
             self.assertEqual((work / "releases/Fixture/Fixture_v2.0.0.zip").read_bytes(), before)
+
+
+class PublicDownloadTests(unittest.TestCase):
+    def test_public_download_checks_bytes_metadata_and_catalog(self):
+        data = package("2.0 Alpha 3")
+        fields = pub.release_reference(inspect(data))
+        filename = "alpha.json"
+        sha = "a" * 40
+        sources = []
+
+        def download(url, timeout):
+            path = url.split("?", 1)[0]
+            sources.append(path)
+            if path.endswith(fields["url"]):
+                return io.BytesIO(data)
+            if path.endswith("/catalog.json"):
+                return io.BytesIO(b'[{"id":"Fixture"}]')
+            return io.BytesIO(json.dumps(fields).encode())
+
+        with patch.object(pub, "urlopen", side_effect=download):
+            self.assertEqual(pub.verify_public("Fixture", filename, fields, sha, catalog_required=True),
+                             f"{pub.PAGES}/releases/Fixture/{fields['url']}")
+        self.assertEqual(len(sources), 7)
+        self.assertTrue(sources[0].startswith(f"{pub.RAW}/{sha}"))
+        self.assertTrue(sources[2].startswith(f"{pub.RAW}/main"))
+        self.assertTrue(sources[4].startswith(pub.PAGES))
+        with patch.object(pub, "urlopen", side_effect=lambda url, timeout:
+                          io.BytesIO(b"wrong") if url.startswith(pub.PAGES) else download(url, timeout)):
+            with self.assertRaisesRegex(pub.Rejected, "GitHub Pages could not be checked"):
+                pub.verify_public("Fixture", filename, fields, sha)
+        with patch.object(pub, "urlopen", side_effect=lambda url, timeout:
+                          io.BytesIO(b"wrong") if url.startswith(pub.PAGES) and ".zip?" in url else download(url, timeout)):
+            with self.assertRaisesRegex(pub.Rejected, "GitHub Pages: download checksum differs"):
+                pub.verify_public("Fixture", filename, fields, sha)
 
 
 class HTTPTests(unittest.TestCase):
@@ -203,6 +379,22 @@ class HTTPTests(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", error.exception.headers["Content-Security-Policy"])
         self.assertEqual(error.exception.headers["Cache-Control"], "no-store")
 
+    def test_verification_requires_session_and_checks_identity_without_commit(self):
+        path = self.origin + "/api/verify-publication"
+        identity = json.dumps({"addon": "Fixture", "version": "2.0.0", "channel": "stable", "sha256": "a" * 64}).encode()
+        with self.assertRaises(HTTPError) as error:
+            urlopen(Request(path, identity))
+        self.assertEqual(error.exception.code, 401)
+        sid = "test-verification-session"
+        server.SESSIONS[sid] = {"csrf": "correct", "expires": time.monotonic() + 20}
+        self.addCleanup(server.SESSIONS.pop, sid)
+        origin = "https://publisher.example"
+        headers = {"Cookie": f"__Host-session={sid}", "X-CSRF-Token": "correct", "Origin": origin,
+                   "Content-Type": "application/json"}
+        with patch.object(server, "ORIGIN", origin), patch.object(server, "checkout", side_effect=TimeoutError):
+            with urlopen(Request(path, identity, headers)) as response:
+                self.assertEqual(json.load(response)["status"], "verifying")
+
     def test_interrupted_upload_rejected_before_validation(self):
         handler = server.Handler.__new__(server.Handler)
         handler.rfile = io.BytesIO(b"abc")
@@ -213,7 +405,6 @@ class HTTPTests(unittest.TestCase):
             handler.read_body(100, "application/zip")
 
     def test_oauth_rejects_wrong_owner_and_consumes_state(self):
-        import time
         state = "test-oauth-state"
         server.STATE[state] = {"verifier": "test", "expires": time.monotonic() + 20}
         handler = server.Handler.__new__(server.Handler)
@@ -229,7 +420,6 @@ class HTTPTests(unittest.TestCase):
             handler.callback(query)
 
     def test_authenticated_cross_origin_rejected(self):
-        import time
         sid = "test-cross-origin"
         server.SESSIONS[sid] = {"csrf": "correct", "expires": time.monotonic() + 20}
         self.addCleanup(server.SESSIONS.pop, sid)

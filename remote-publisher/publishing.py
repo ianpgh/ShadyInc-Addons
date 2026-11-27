@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -20,11 +21,13 @@ import zipfile
 REPO = "https://github.com/ianpgh/ShadyInc-Addons.git"
 RAW = "https://raw.githubusercontent.com/ianpgh/ShadyInc-Addons"
 PAGES = "https://ianpgh.github.io/ShadyInc-Addons"
+LOGGER = logging.getLogger(__name__)
 LIMIT = 32 * 1024 * 1024
 ID = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 NUMBER = r"(0|[1-9][0-9]{0,5})"
 VERSION = re.compile(rf"{NUMBER}\.{NUMBER}(?:\.{NUMBER})?(?:[ -](alpha|beta)(?:[ .-]([0-9]{{1,6}}))?)?", re.I)
 CHANNELS = {"stable": "latest.json", "alpha": "alpha.json", "beta": "beta.json"}
+CHECK_ERRORS = (ValueError, TypeError, KeyError, OSError, subprocess.SubprocessError)
 SAFE_ASSETS = {".toc", ".lua", ".xml", ".txt", ".md", ".blp", ".tga", ".dds",
                ".png", ".jpg", ".jpeg", ".ogg", ".mp3", ".wav", ".ttf", ".otf", ".csv", ".json"}
 
@@ -180,16 +183,19 @@ def manager_archive(archive, selected):
     return fields, executable
 
 
-def manager_plan(work, package):
+def manager_plan(work, package, resume=False):
     folder = release_dir(work, MANAGER)
-    current = manifest(folder, "latest.json")
     fields = manager_fields(package["managerFields"])
+    current = current_manifest(folder, "latest.json", fields, resume)
     incoming = version(fields["version"])[1]
-    require(not current or incoming > version(current["version"])[1], "Manager version must be newer than current.")
+    require(not current or matches_release(current, fields) or incoming > version(current["version"])[1],
+            "Manager version must be newer than current.")
     target = folder / fields["url"]
-    require(not target.exists() and not target.is_symlink(), "Manager executable already exists.")
+    check_destination(work, folder, "latest.json", fields, current, resume)
     if folder.exists():
         for asset in folder.glob("ShadyAddonManager_*_windows_amd64.exe"):
+            if resume and asset == target:
+                continue
             old = asset.name[len("ShadyAddonManager_"):-len("_windows_amd64.exe")]
             try:
                 channel, parts = version(old)
@@ -331,23 +337,96 @@ def check_manifest(folder, data):
     return data
 
 
-def plan(work, package):
+def release_reference(package):
+    if package["addon"] == MANAGER:
+        return manager_fields(package["managerFields"])
+    return {key: package[key] for key in ("addon", "version", "url", "sha256")}
+
+
+def matches_release(data, fields):
+    return isinstance(data, dict) and all(data.get(key) == value for key, value in fields.items())
+
+
+def read_release_metadata(folder, filename):
+    path = folder / filename
+    require(not path.is_symlink(), "Unsafe repository manifest.")
+    if not path.exists():
+        return None
+    data = read_json(path)
+    require(isinstance(data, dict), "Invalid repository manifest.")
+    return data
+
+
+def current_manifest(folder, filename, fields, resume):
+    data = read_release_metadata(folder, filename)
+    if data is None or (resume and matches_release(data, fields)):
+        return data
+    return check_manifest(folder, data)
+
+
+def asset_state(folder, fields):
+    path = folder / fields["url"]
+    if not path.exists() and not path.is_symlink():
+        return "missing"
+    if (not path.is_symlink() and path.is_file() and path.stat().st_size <= LIMIT
+            and digest(path.read_bytes()) == fields["sha256"]):
+        return "matching"
+    return "conflict"
+
+
+def catalog_entries(work):
+    catalog_path = work / "catalog.json"
+    require(not catalog_path.is_symlink(), "Unsafe catalog path.")
+    catalog = read_json(catalog_path)
+    require(isinstance(catalog, list), "Invalid catalog.")
+    ids = [row["id"] for row in catalog]
+    require(all(map(valid_id, ids)) and len({x.casefold() for x in ids}) == len(ids), "Invalid catalog IDs.")
+    return catalog
+
+
+def publication_state(work, fields, filename):
+    addon = fields.get("addon", fields.get("manager"))
+    folder = release_dir(work, addon)
+    live = read_release_metadata(folder, filename)
+    asset = asset_state(folder, fields)
+    catalog = addon == MANAGER or any(row["id"] == addon for row in catalog_entries(work))
+    return {"asset": asset, "metadata": matches_release(live, fields), "catalog": catalog, "live": live}
+
+
+def check_destination(work, folder, filename, fields, current, resume):
+    state = asset_state(folder, fields) if resume else None
+    target = folder / fields["url"]
+    if not target.exists() and not target.is_symlink():
+        return
+    require(resume and state == "matching", "This versioned file already exists with different or unverified bytes.")
+    if not matches_release(current, fields):
+        # A retained file from a superseded or rolled back release is never promoted by a publish retry.
+        if git(work, "rev-parse", "--is-shallow-repository").strip() == b"true":
+            git(work, "fetch", "--unshallow", "origin", "main")
+        history = git(work, "log", "-1", "-S", fields["url"], "--", str((folder / filename).relative_to(work)))
+        require(not history, "This version was previously published. Use release history to restore it.")
+
+
+def plan(work, package, resume=False):
     addon, channel = package["addon"], package["channel"]
     folder = release_dir(work, addon)
     filename = CHANNELS[channel]
-    latest = manifest(folder, "latest.json")
-    current = latest if channel == "stable" else manifest(folder, filename)
+    fields = release_reference(package)
+    latest = current_manifest(folder, "latest.json", fields, resume)
+    current = latest if channel == "stable" else current_manifest(folder, filename, fields, resume)
     if current and channel != "stable":
         require(version(current["version"])[0] == channel, "Existing prerelease manifest has a channel mismatch.")
     candidates = []
-    if current and version(current["version"])[0] == channel:
+    if current and not (resume and matches_release(current, fields)) and version(current["version"])[0] == channel:
         candidates.append(version(current["version"])[1])
-    if latest and version(latest["version"])[0] == channel:
+    if latest and not (resume and matches_release(latest, fields)) and version(latest["version"])[0] == channel:
         candidates.append(version(latest["version"])[1])
     target = folder / package["url"]
-    require(not target.exists() and not target.is_symlink(), "This versioned ZIP already exists.")
+    check_destination(work, folder, filename, fields, current, resume)
     if folder.exists():
         for asset in folder.glob(f"{addon}_v*.zip"):
+            if resume and asset == target:
+                continue
             try:
                 old_channel, parts = version(asset.name[len(addon) + 2:-4].replace("_", " "))
             except Rejected:
@@ -355,25 +434,22 @@ def plan(work, package):
             if old_channel == channel:
                 candidates.append(parts)
     incoming = version(package["version"])[1]
-    require(incoming not in candidates, "This version already exists in the channel.")
-    require(not candidates or incoming > max(candidates), "Publishing would downgrade this channel.")
-    catalog_path = work / "catalog.json"
-    require(not catalog_path.is_symlink(), "Unsafe catalog path.")
-    catalog = read_json(catalog_path)
-    require(isinstance(catalog, list), "Invalid catalog.")
+    if not (resume and matches_release(current, fields)):
+        require(incoming not in candidates, "This version already exists in the channel.")
+        require(not candidates or incoming > max(candidates), "Publishing would downgrade this channel.")
+    catalog = catalog_entries(work)
     ids = [row["id"] for row in catalog]
-    require(all(map(valid_id, ids)) and len({x.casefold() for x in ids}) == len(ids), "Invalid catalog IDs.")
     require(addon in ids or addon.casefold() not in {x.casefold() for x in ids}, "Catalog ID case mismatch.")
     return folder, filename, latest, current, catalog
 
 
-def preview(work, package):
+def preview(work, package, resume=False):
     if package["addon"] == MANAGER:
-        _, current = manager_plan(work, package)
+        _, current = manager_plan(work, package, resume)
         live = current["version"] if current else None
         return {**package, "current": live, "publicStable": live,
                 "destination": MANAGER_PREFIX + "latest.json", "catalogChange": False}
-    _, filename, latest, current, catalog = plan(work, package)
+    _, filename, latest, current, catalog = plan(work, package, resume)
     addon = package["addon"]
     return {**package, "current": current["version"] if current else None,
             "publicStable": latest["version"] if latest and version(latest["version"])[0] == "stable" else None,
@@ -382,19 +458,17 @@ def preview(work, package):
                              or bool(package["channel"] == "stable" and package["features"])}
 
 
-def apply(work, package, data):
+def apply(work, package, data, resume=False):
     if package["addon"] == MANAGER:
-        folder, _ = manager_plan(work, package)
+        folder, current = manager_plan(work, package, resume)
         require(digest(data) == package["sha256"], "Manager ZIP changed after validation.")
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             fields, executable = manager_archive(archive, "stable")
         require(fields == package["managerFields"], "Manager manifest changed.")
         folder.mkdir(exist_ok=True)
-        target = folder / fields["url"]
-        target.write_bytes(executable)
-        write_json(folder / "latest.json", fields)
-        return fields, [target, folder / "latest.json"]
-    folder, filename, latest, _, catalog = plan(work, package)
+        paths = write_release(folder, "latest.json", fields, executable, current, resume)
+        return fields, paths
+    folder, filename, latest, current, catalog = plan(work, package, resume)
     folder.mkdir(exist_ok=True)
     addon, channel = package["addon"], package["channel"]
     paths = []
@@ -417,14 +491,28 @@ def apply(work, package, data):
         catalog_path = work / "catalog.json"
         write_json(catalog_path, catalog)
         paths.append(catalog_path)
-    fields = {key: package[key] for key in ("addon", "version", "url", "sha256")}
-    fields["published_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if package["changelog"]:
-        fields["changelog"] = package["changelog"]
-    target = folder / package["url"]
-    target.write_bytes(data)
-    write_json(folder / filename, fields)
-    return fields, [*paths, target, folder / filename]
+    fields = release_reference(package)
+    if resume and matches_release(current, fields):
+        fields = current
+    else:
+        fields["published_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if package["changelog"]:
+            fields["changelog"] = package["changelog"]
+    paths.extend(write_release(folder, filename, fields, data, current, resume))
+    return fields, paths
+
+
+def write_release(folder, filename, fields, data, current, resume):
+    paths = []
+    target = folder / fields["url"]
+    if not resume or not target.exists():
+        target.write_bytes(data)
+        paths.append(target)
+    if not resume or fields != current:
+        path = folder / filename
+        write_json(path, fields)
+        paths.append(path)
+    return paths
 
 
 def commit_push(work, paths, message, token=None):
@@ -437,23 +525,32 @@ def commit_push(work, paths, message, token=None):
     sha = git(work, "rev-parse", "HEAD").decode().strip()
     try:
         git(work, "push", "origin", "HEAD:refs/heads/main", token=token)
-    except (Rejected, subprocess.TimeoutExpired):
+    except (Rejected, OSError, subprocess.SubprocessError) as exc:
+        LOGGER.warning("Git push response unconfirmed for %s (%s)", sha, type(exc).__name__)
         return sha, False
     return sha, True
 
 
-def verify_public(addon, filename, fields, sha):
+def verify_public(addon, filename, fields, sha, *, catalog_required=False):
     manifest_path = f"releases/{addon}/{filename}"
     asset_path = f"releases/{addon}/{quote(fields['url'])}"
     stamp = f"?remote={sha}-{os.urandom(5).hex()}"
-    for address in (f"{RAW}/{sha}", f"{RAW}/main", PAGES):
-        with urlopen(f"{address}/{manifest_path}{stamp}", timeout=8) as response:
-            current = json.loads(response.read(1024 * 1024))
-        require(current == fields, "The published manifest has not propagated or has been superseded.")
-        with urlopen(f"{address}/{asset_path}{stamp}", timeout=8) as response:
-            require(digest(response.read(LIMIT + 1)) == fields["sha256"], "Public download checksum differs.")
-    if filename == "latest.json" and addon != MANAGER:
-        with urlopen(f"{PAGES}/catalog.json{stamp}", timeout=8) as response:
-            catalog = json.loads(response.read(1024 * 1024))
-        require(any(row["id"] == addon for row in catalog), "Public catalog has not propagated.")
+    sources = (("GitHub commit", f"{RAW}/{sha}"), ("GitHub main", f"{RAW}/main"), ("GitHub Pages", PAGES))
+    for source, address in sources:
+        try:
+            with urlopen(f"{address}/{manifest_path}{stamp}", timeout=8) as response:
+                current = json.loads(response.read(1024 * 1024))
+            require(current == fields, "version metadata differs")
+            with urlopen(f"{address}/{asset_path}{stamp}", timeout=8) as response:
+                require(digest(response.read(LIMIT + 1)) == fields["sha256"], "download checksum differs")
+            if address == PAGES and addon != MANAGER and (catalog_required or filename == "latest.json"):
+                with urlopen(f"{address}/catalog.json{stamp}", timeout=8) as response:
+                    catalog = json.loads(response.read(1024 * 1024))
+                require(any(row["id"] == addon for row in catalog), "addon is missing from the public catalog")
+        except Rejected as exc:
+            raise Rejected(f"{source}: {exc}.") from exc
+        except CHECK_ERRORS as exc:
+            code = getattr(exc, "code", None)
+            detail = f"HTTP {code}" if isinstance(code, int) else type(exc).__name__
+            raise Rejected(f"{source} could not be checked ({detail}).") from exc
     return f"{PAGES}/{asset_path}"

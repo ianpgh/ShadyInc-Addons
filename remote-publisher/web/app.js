@@ -6,6 +6,13 @@ const eastern = new Intl.DateTimeFormat("en-US", {
   dateStyle: "medium", timeStyle: "short", timeZone: "America/New_York", hour12: true
 });
 let session, head, busy = false;
+const publicationLabels = {
+  publishing: "Publishing",
+  verifying: "Verifying",
+  published: "Successfully Published",
+  partial: "Partially Published",
+  failed: "Confirmed Failure"
+};
 
 function text(tag, content, className) {
   const element = document.createElement(tag);
@@ -33,7 +40,7 @@ function notice(message) {
   byId("notice").textContent = message;
 }
 
-async function api(path, body, headers = {}) {
+async function api(path, body, headers = {}, timeout) {
   const settings = {cache: "no-store", credentials: "same-origin"};
   if (body !== undefined) {
     const file = body instanceof File;
@@ -42,6 +49,17 @@ async function api(path, body, headers = {}) {
       "X-CSRF-Token": session.csrf, ...headers};
     settings.body = file ? body : JSON.stringify(body);
   }
+  const controller = new AbortController();
+  settings.signal = controller.signal;
+  const timer = timeout && setTimeout(() => controller.abort(), timeout);
+  try {
+    return await request(path, settings);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function request(path, settings) {
   const response = await fetch("/api/" + path, settings);
   if (response.status === 401) {
     signedOut("✕ Session expired. Sign in again.");
@@ -98,7 +116,7 @@ function render() {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = item.selected;
-    checkbox.disabled = busy || Boolean(item.receipt);
+    checkbox.disabled = busy || Boolean(item.publication);
     checkbox.addEventListener("change", () => { item.selected = checkbox.checked; controls(); });
     label.prepend(checkbox);
     row.append(label);
@@ -108,7 +126,7 @@ function render() {
       channel.append(new Option(name === "auto" ? "Detect channel" : name[0].toUpperCase() + name.slice(1), name));
     }
     channel.value = item.channel;
-    channel.disabled = busy || Boolean(item.receipt);
+    channel.disabled = busy || Boolean(item.publication);
     channel.addEventListener("change", () => {
       item.channel = channel.value;
       item.preview = null;
@@ -117,24 +135,28 @@ function render() {
       render();
     });
     row.append(channel);
-    const status = text("p", item.message, item.error ? "error" : item.download ? "good" : "warn");
-    status.setAttribute("role", "status");
+    const tone = item.error || item.status === "failed" ? "error" : item.download ? "good" : "warn";
+    const status = text("p", item.message, tone);
     row.append(status);
     if (item.preview) {
       const review = item.preview;
       heading.textContent = review.name + " · " + review.version;
-      row.append(text("p", (review.addon === "ShadyDesktopManager" ? "Manager Update" : review.addon + " · " + review.channel) + " · Current version " + (review.current || "none")));
-      row.append(text("p", "Destination " + review.destination + " · Catalog " + (review.catalogChange ? "update expected" : "unchanged")));
+      row.append(text("p", review.addon === "ShadyDesktopManager" ? "Manager Update" : review.addon + " · " + review.channel));
+      if (!review.alreadyPublished) {
+        row.append(text("p", "Current version " + (review.current || "none") + " · " + review.destination));
+        if (review.catalogChange) row.append(text("p", "Catalog update expected"));
+      }
       for (const note of [...review.changelog, ...review.features]) row.append(text("p", "• " + note));
       for (const warning of review.warnings) row.append(text("p", "⚠ " + warning, "warn"));
     }
     const actions = text("div", "", "actions");
-    if (item.receipt) {
-      actions.append(link("View Commit", item.receipt.link));
+    if (item.publication) {
+      if (item.commit) actions.append(link("View GitHub Commit", item.commit));
       if (item.download) actions.append(link("View Published Release", item.download));
-      else actions.append(button("Retry Verification", () => run(() => verify(item)), busy));
-    } else {
-      actions.append(button(item.error ? "Retry Failed" : "Validate Package", () => run(() => validate(item)), busy));
+      actions.append(button("Verify Publication", () => run(() => verify(item)), busy));
+    }
+    if (!item.publication || item.retryable) {
+      actions.append(button(item.publication ? "Validate Again" : "Validate Package", () => run(() => validate(item)), busy));
     }
     actions.append(button("Remove From Queue", () => {
       queue.splice(queue.indexOf(item), 1);
@@ -147,7 +169,7 @@ function render() {
 }
 
 function controls() {
-  const valid = queue.filter(item => item.preview && !item.receipt && !item.error);
+  const valid = queue.filter(item => item.preview && !item.publication && !item.error);
   byId("count").textContent = queue.length + " queued";
   byId("empty").hidden = queue.length > 0;
   byId("all").disabled = busy || !valid.length;
@@ -162,7 +184,17 @@ async function validate(item) {
   render();
   try {
     item.preview = await api("validate", item.file, {"X-Release-Channel": item.channel});
-    item.message = "✓ Validated · awaiting confirmation";
+    if (item.preview.alreadyPublished) {
+      item.publication = reference(item.preview);
+      await verify(item, true);
+    } else {
+      item.publication = null;
+      item.status = null;
+      item.retryable = false;
+      item.commit = null;
+      item.download = null;
+      item.message = "✓ Validated · awaiting confirmation";
+    }
   } catch (error) {
     item.error = true;
     item.message = "✕ " + error.message;
@@ -170,42 +202,78 @@ async function validate(item) {
   render();
 }
 
-async function verify(item) {
-  item.message = "… Verifying repository, catalog and public download";
-  item.error = false;
-  render();
-  try {
-    const result = await api("check", item.receipt);
-    item.download = result.download;
-    item.message = "✓ Published and verified";
-  } catch (error) {
-    item.message = "⚠ Verification pending · " + error.message;
-    item.error = true;
-  }
+function reference(review) {
+  const {addon, channel, version, sha256, managerFields} = review;
+  return {addon, channel, version, sha256: managerFields?.sha256 ?? sha256};
+}
+
+function updatePublication(item, status, detail) {
+  item.status = status;
+  item.message = publicationLabels[status] + " · " + detail;
+  byId("publication-progress").textContent = (item.preview?.name || item.publication.addon) + " " + item.publication.version + " · " + item.message;
   render();
 }
 
+async function verify(item, automatic = false, publishError = "") {
+  const delays = automatic ? [0, 2000, 5000, 8000] : [0, 2000];
+  let absent = 0;
+  item.error = false;
+  for (const [index, delay] of delays.entries()) {
+    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+    updatePublication(item, "verifying", "Checking GitHub metadata and the public download.");
+    let result;
+    try {
+      result = await api("verify-publication", item.publication, {}, 120000);
+    } catch (error) {
+      result = {status: "verifying", detail: session
+        ? "Verification could not reach the service. Use Verify Publication to check again."
+        : "Sign in again to verify publication."};
+    }
+    absent = result.status === "absent" ? absent + 1 : 0;
+    item.download = result.download;
+    item.commit = item.commit || result.link;
+    item.retryable = false;
+    if (result.status === "absent") {
+      if (absent < 2 || (automatic && index < delays.length - 1)) {
+        updatePublication(item, "verifying", "Waiting for the publication to appear on GitHub.");
+        continue;
+      }
+      result.status = "failed";
+      if (publishError) result.detail += " Publish response: " + publishError;
+    }
+    item.retryable = result.retryable === true;
+    updatePublication(item, result.status, result.detail);
+    if (result.status === "published" || result.status === "failed" || !session ||
+        (result.status === "partial" && (item.retryable || !automatic))) return;
+  }
+}
+
 async function publish(all) {
-  const items = queue.filter(item => item.preview && !item.receipt && !item.error && (all || item.selected));
+  const items = queue.filter(item => item.preview && !item.publication && !item.error && (all || item.selected));
   const summary = items.map(item => {
     const {addon, version, channel, destination} = item.preview;
     return addon + " " + version + " (" + channel + ") → " + destination;
   }).join("\n");
   if (!items.length || !window.confirm("Publish the following packages to the public repository?\n\n" + summary)) return;
-  for (const item of items) {
-    item.message = "↑ Uploading and processing repository changes";
-    render();
+  for (const [index, item] of items.entries()) {
+    if (!session) break;
+    item.publication = reference(item.preview);
+    updatePublication(item, "publishing", "Uploading ZIP and saving to GitHub (" + (index + 1) + " of " + items.length + ").");
+    let publishError = "";
     try {
-      item.receipt = await api("publish", item.file, {
+      const receipt = await api("publish", item.file, {
         "X-Validation-Ticket": item.preview.ticket, "X-Release-Confirmation": "publish"
-      });
-      await verify(item);
+      }, 150000);
+      if (receipt.status === "verification_pending") item.commit = receipt.link;
+      if (receipt.status === "push_unconfirmed") publishError = "GitHub did not acknowledge the push attempts.";
     } catch (error) {
-      item.error = true;
-      item.message = "✕ " + error.message + " Check release history before retrying.";
+      if (error.name !== "AbortError" && !(error instanceof TypeError) && !(error instanceof SyntaxError)) {
+        publishError = error.message;
+      }
     }
+    if (session) await verify(item, true, publishError);
   }
-  await refresh();
+  if (session) await refresh();
 }
 
 async function rollback(row) {
@@ -239,7 +307,17 @@ async function refresh() {
       const element = document.createElement("li");
       element.append(text("h3", row.addon + " " + row.version + " · " + row.channel),
         text("p", "✓ Committed · " + row.action + " · " + eastern.format(new Date(row.date)) + " ET · " + row.source),
-        link("View Commit", row.link));
+        link("View Commit", row.link),
+        " ", button("Verify Publication", () => run(async () => {
+          notice("Verifying · " + row.addon + " " + row.version);
+          try {
+            const result = await api("check", row);
+            notice("Successfully Published · " + row.addon + " " + row.version);
+            byId("notice").append(" ", link("View Published Release", result.download));
+          } catch (error) {
+            notice("Verification incomplete · " + error.message);
+          }
+        })));
       if (row.addon !== "ShadyDesktopManager") {
         element.append(" ", button("Restore This Version", () => run(() => rollback(row))));
       }

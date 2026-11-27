@@ -18,8 +18,9 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from publishing import (
-    CHANNELS, LIMIT, MANAGER, Rejected, apply, check_manifest, checkout, commit_push,
-    digest, git, inspect, manifest, preview, release_dir, require, valid_id, verify_public, version,
+    CHANNELS, CHECK_ERRORS, LIMIT, MANAGER, Rejected, apply, check_manifest, checkout, commit_push,
+    digest, git, inspect, manager_fields, manifest, preview, publication_state, release_dir, release_reference,
+    require, valid_id, verify_public, version,
 )
 
 ORIGIN = os.getenv("PUBLIC_ORIGIN", "").rstrip("/")
@@ -38,6 +39,8 @@ GUARD = Lock()
 REPO_OPERATION = BoundedSemaphore(2)
 WRITER = Lock()
 SHA = re.compile(r"[0-9a-f]{40}")
+CHECKSUM = re.compile(r"[0-9a-f]{64}")
+VERSION = "1.1.0"
 COMMIT_URL = "https://github.com/ianpgh/ShadyInc-Addons/commit/"
 
 
@@ -60,6 +63,10 @@ def audit(action, status, **values):
                       "at": datetime.now(timezone.utc).isoformat(), **values}), flush=True)
 
 
+def complete(state):
+    return state["asset"] == "matching" and state["metadata"] and state["catalog"]
+
+
 def bounded(method):
     @wraps(method)
     def wrapped(self, *args):
@@ -72,7 +79,7 @@ def bounded(method):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ShadyRemotePublisher"
+    server_version = f"ShadyRemotePublisher/{VERSION}"
     timeout = 20
 
     def log_message(self, format, *args):
@@ -203,7 +210,10 @@ class Handler(BaseHTTPRequestHandler):
         data = self.read_body(LIMIT, "application/zip")
         package = inspect(data, selected)
         with checkout() as work:
-            result = preview(work, package)
+            state = publication_state(work, release_reference(package), CHANNELS[package["channel"]])
+            if complete(state):
+                return {**package, "alreadyPublished": True}
+            result = preview(work, package, resume=True)
         ticket = secrets.token_urlsafe(24)
         with GUARD:
             if len(session["tickets"]) >= 50:
@@ -220,25 +230,115 @@ class Handler(BaseHTTPRequestHandler):
 
     @bounded
     def publish(self, session):
-        data = self.read_body(LIMIT, "application/zip")
-        ticket = self.headers.get("X-Validation-Ticket", "")
         require(self.headers.get("X-Release-Confirmation") == "publish", "Explicit publish confirmation required.")
-        with GUARD:
-            binding = session["tickets"].pop(ticket, None)
-        require(binding and hmac.compare_digest(binding[0], digest(data)), "Validate these exact ZIP bytes before publishing.")
-        package = inspect(data, binding[1])
-        require(WRITER.acquire(blocking=False), "Another publish is in progress. Validate and try again.")
+        require(WRITER.acquire(blocking=False), "Another repository write is in progress. Verify Publication before retrying.")
         try:
-            with checkout() as work:
-                review = preview(work, package)
-                require((review["current"], review["publicStable"]) == binding[2:],
-                        "The reviewed channel changed. Validate again.")
-                fields, paths = apply(work, package, data)
-                self.require_active(session)
-                sha, pushed = commit_push(work, paths, f"Publish {package['addon']} {package['version']}", session["token"])
+            return self.publish_locked(session)
         finally:
             WRITER.release()
-        return self.receipt(fields, CHANNELS[package["channel"]], sha, pushed)
+
+    def publish_locked(self, session):
+        data = self.read_body(LIMIT, "application/zip")
+        ticket = self.headers.get("X-Validation-Ticket", "")
+        with GUARD:
+            binding = session["tickets"].get(ticket)
+            require(binding and hmac.compare_digest(binding[0], digest(data)),
+                    "Validate these exact ZIP bytes before publishing.")
+            session["tickets"].pop(ticket)
+        package = inspect(data, binding[1])
+        fields = release_reference(package)
+        filename = CHANNELS[package["channel"]]
+        context = {"addon": package["addon"], "version": package["version"], "channel": package["channel"]}
+        sha = None
+        for attempt in (1, 2, 3):
+            with checkout() as work:
+                state = publication_state(work, fields, filename)
+                if complete(state):
+                    sha = git(work, "rev-parse", "HEAD").decode().strip()
+                    audit("publish", "already_on_github", sha=sha, attempt=attempt, **context)
+                    return self.receipt(fields, filename, sha, True)
+                if attempt == 3:
+                    break
+                review = preview(work, package, resume=True)
+                require((review["current"], review["publicStable"]) == binding[2:] or state["metadata"],
+                        "The reviewed channel changed. Validate the package again.")
+                paths = apply(work, package, data, resume=True)[1]
+                self.require_active(session)
+                sha, pushed = commit_push(work, paths, f"Publish {package['addon']} {package['version']}", session["token"])
+                if pushed:
+                    return self.receipt(fields, filename, sha, True)
+            audit("publish", "push_response_unconfirmed", sha=sha, attempt=attempt, **context)
+            time.sleep(1)
+        return self.receipt(fields, filename, sha, False)
+
+    def verification_reference(self):
+        data = json.loads(self.read_body(4096, "application/json"))
+        addon, release, channel, checksum = (data[key] for key in ("addon", "version", "channel", "sha256"))
+        require(all(isinstance(value, str) for value in (addon, release, channel, checksum)) and
+                channel in CHANNELS and version(release)[0] == channel and CHECKSUM.fullmatch(checksum),
+                "Invalid publication reference.")
+        if addon == MANAGER:
+            fields = manager_fields({"manager": addon, "version": release, "sha256": checksum,
+                                     "url": f"ShadyAddonManager_{release}_windows_amd64.exe"})
+        else:
+            require(valid_id(addon), "Invalid publication reference.")
+            fields = {"addon": addon, "version": release, "sha256": checksum,
+                      "url": f"{addon}_v{release.replace(' ', '_')}.zip"}
+        return addon, channel, fields
+
+    @bounded
+    def verify_publication(self):
+        addon, channel, fields = self.verification_reference()
+        filename = CHANNELS[channel]
+        context = {"addon": addon, "version": fields["version"], "channel": channel}
+
+        def result(status, detail, **values):
+            audit("verify_publication", status, **context, detail=detail, **values)
+            return {"status": status, "detail": detail, **values}
+
+        if WRITER.locked():
+            return result("publishing", "A repository write is in progress. Use Verify Publication to check again.")
+        try:
+            with checkout() as work:
+                sha = git(work, "rev-parse", "HEAD").decode().strip()
+                state = publication_state(work, fields, filename)
+        except CHECK_ERRORS as exc:
+            return result("verifying", f"GitHub could not be checked ({type(exc).__name__}). Use Verify Publication to check again.")
+
+        if not complete(state):
+            if WRITER.locked():
+                return result("publishing", "A repository write is in progress. Use Verify Publication to check again.")
+            asset, metadata = state["asset"], state["metadata"]
+            live = state["live"]
+            if asset == "conflict" or (live and not metadata and live.get("version") == fields["version"]):
+                detail = "GitHub already has conflicting data for this version. Check the filename and checksum or use a new version."
+                return result("partial" if metadata or asset == "matching" else "failed", detail, retryable=False)
+            if asset == "matching" and not metadata and live:
+                live_channel, live_version = version(live.get("version", ""))
+                if live_channel == channel and live_version >= version(fields["version"])[1]:
+                    return result("partial", f"The ZIP is on GitHub. The channel currently points to {live['version']}. Review release history.",
+                                  retryable=False)
+            if asset == "matching" or metadata:
+                missing = []
+                if asset == "missing":
+                    missing.append("the download file")
+                if not metadata:
+                    missing.append("matching channel metadata")
+                if not state["catalog"]:
+                    missing.append("the catalog entry")
+                return result("partial", "GitHub is missing " + ", ".join(missing) +
+                              ". Validate the same ZIP to repair an incomplete release. Use History for earlier releases.",
+                              retryable=True)
+            return result("absent", "GitHub has no matching file or channel metadata. Validate the same ZIP before retrying.",
+                          retryable=True)
+
+        try:
+            download = verify_public(addon, filename, state["live"], sha, catalog_required=True)
+        except Rejected as exc:
+            return result("partial", f"GitHub has the file and metadata. {exc} Use Verify Publication to recheck the download.",
+                          sha=sha, link=COMMIT_URL + sha, retryable=False)
+        return result("published", "GitHub metadata and the public download checksum match.",
+                      sha=sha, link=COMMIT_URL + sha, download=download)
 
     def read_operation(self):
         data = json.loads(self.read_body(4096, "application/json"))
@@ -328,17 +428,22 @@ class Handler(BaseHTTPRequestHandler):
                     SESSIONS.pop(self.cookie("__Host-session"), None)
                 return self.send(204, Set_Cookie="__Host-session=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0")
             routes = {"/api/validate": lambda: self.validate(session), "/api/publish": lambda: self.publish(session),
-                      "/api/check": self.check, "/api/rollback": lambda: self.rollback(session)}
+                      "/api/check": self.check, "/api/verify-publication": self.verify_publication,
+                      "/api/rollback": lambda: self.rollback(session)}
             if path not in routes:
                 return self.json(404, {"error": "Unknown endpoint."})
             result = routes[path]()
         except Rejected as exc:
-            if path in {"/api/publish", "/api/rollback"}:
-                audit(path, "rejected")
+            if path in {"/api/publish", "/api/rollback", "/api/verify-publication"}:
+                audit(path, "rejected", detail=str(exc))
             return self.json(409, {"error": str(exc)})
-        except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
-            return self.json(502, {"error": "Operation could not be confirmed. Refresh history before retrying."})
-        self.json(200, result)
+        except CHECK_ERRORS as exc:
+            audit(path, "unconfirmed", error=type(exc).__name__)
+            return self.json(502, {"error": "GitHub or the request could not be checked. Use Verify Publication before retrying."})
+        try:
+            self.json(200, result)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError) as exc:
+            audit(path, "response_disconnected", error=type(exc).__name__)
 
 
 class HTTPServer(ThreadingHTTPServer):

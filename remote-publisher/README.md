@@ -1,4 +1,4 @@
-# Shady Remote Publisher v1.0.0
+# Shady Remote Publisher v1.1.0
 
 Installable iPhone publisher for WoW Forever addon ZIPs. This service runs independently of the Windows PC. The production repository and GitHub Pages website retain their existing structure. The deployment branch can be deployed directly without merging into `main`.
 
@@ -17,9 +17,11 @@ Use one container replica and an HTTPS reverse proxy with request time and body 
 
 - Uploading and validating sends data only to the service. The queue stays in memory. The server inspects the exact bytes again when you confirm publication. A compatible manual channel selection must agree with the TOC version.
 - Each package is its own commit. Stable uses `latest.json`, Alpha uses `alpha.json`, and Beta uses `beta.json`. The ZIP keeps the desktop publisher's filename and checksum format. A failed package does not prevent other packages from being attempted.
-- The server compares the live ref before commit and uses a non-force push. If Windows publishes first, refresh and validate again. If an upload or response drops, refresh history before retrying. Verification checks the commit, current raw feed, GitHub Pages feed and download, and the public catalog for Stable. A pending result can be rechecked while Pages propagates.
+- The server compares the live ref before commit and uses a non-force push. After an uncertain push, it checks GitHub before making one bounded retry. An identical publication is reused. A retry can fill in missing files or metadata when the reviewed channel and checksums allow it. A conflicting ZIP or a version retained by rollback requires a separate review.
+- The queue automatically switches from **Publishing** to **Verifying**, even if the upload or response times out. It checks the ZIP checksum, channel metadata and catalog on GitHub, then checks GitHub Pages and the public download. **Successfully Published** means those checks passed. **Partially Published** identifies an incomplete release or a public feed that still needs to catch up. **Confirmed Failure** means GitHub reported an absent release on repeated checks or exposed a conflict. An unavailable GitHub check stays in **Verifying**.
+- Use **Verify Publication** to recheck a package or an active release from history. If verification reports missing files or metadata, validate the same ZIP and confirm publication to repair them. After reloading the page, select the same ZIP to check for an existing publication.
 - History shows matching release commits with author/source and Eastern time. Restore an earlier version from the same channel and confirm explicitly. Rollback commits only the selected manifest, retains all ZIPs, and requires the reviewed head to remain current. Catalog descriptions and features remain as currently published.
-- The remote service accepts addon ZIPs only. Keep using the Windows publisher for the Desktop Addon Manager executable or a publisher-specific bundle.
+- The remote service accepts addon ZIPs and Desktop Addon Manager update ZIPs with the existing manager manifest and executable layout.
 - Sign-out deletes the server-side session. For emergency revocation, uninstall the GitHub App or revoke its authorization in GitHub, rotate the client secret if exposed, and stop or redeploy the service. Git history records successful mutations and the service emits structured operation logs. Host log retention is dependent on the selected plan.
 
 ## Local checks
