@@ -1,7 +1,7 @@
 {
   "addon": "AuctionPeek",
-  "version": "2.11.0",
-  "url": "AuctionPeek_v2.11.0.zip",
-  "sha256": "ec2f2af419f9dc563e4d8d5ab97b2e0fa248108aa42d919f821845be1c0944d9",
-  "published_at": "2026-11-26T20:40:15Z"
+  "published_at": "2026-11-27T16:22:12Z",
+  "sha256": "8ee770ce5494cfce0e2be69bf68c3ecd335f7baba25596297a5988cf6d41042c",
+  "url": "AuctionPeek_v2.12.0.zip",
+  "version": "2.12.0"
 }
