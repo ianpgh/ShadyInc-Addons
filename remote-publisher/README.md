@@ -1,4 +1,4 @@
-# Shady Remote Publisher v1.2.0
+# Shady Remote Publisher v1.2.1
 
 Installable iPhone publisher for WoW Forever addon ZIPs. This service runs independently of the Windows PC. The production repository and GitHub Pages website retain their existing structure. The deployment branch can be deployed directly without merging into `main`.
 
@@ -15,7 +15,7 @@ Use one container replica and an HTTPS reverse proxy with request time and body 
 
 ## Publishing and recovery
 
-- Uploading and validating sends data only to the service. The queue stays in memory. The server inspects the exact bytes again when you confirm publication. A compatible manual channel selection must agree with the TOC version.
+- Uploading and validating sends data only to the service. The queue stays in memory. Validated ZIPs are staged in bounded process memory (64 MiB total, 30-minute lifetime); publishing normally sends only a ticket. Expired or evicted ZIPs require revalidation and renewed confirmation. Background publish jobs are polled by their session-bound ticket; after a restart use verification before retrying. The server inspects the exact bytes again when you confirm publication. A compatible manual channel selection must agree with the TOC version.
 - Each package is its own commit. Stable uses `latest.json`, Alpha uses `alpha.json`, and Beta uses `beta.json`. The ZIP keeps the desktop publisher's filename and checksum format. A failed package does not prevent other packages from being attempted.
 - The server compares the live ref before commit and uses a non-force push. After an uncertain push, it checks GitHub before making one bounded retry. An identical publication is reused. A retry can fill in missing files or metadata when the reviewed channel and checksums allow it. A conflicting ZIP or a version retained by rollback requires a separate review.
 - The queue automatically switches from **Publishing** to **Verifying**, even if the upload or response times out. It checks the ZIP checksum, channel metadata and catalog on GitHub, then checks GitHub Pages and the public download. **Successfully Published** means those checks passed; verified items leave the queue after three seconds. Failed and partial items remain available for verification or retry. **Partially Published** identifies an incomplete release or a public feed that still needs to catch up. **Confirmed Failure** means GitHub reported an absent release on repeated checks or exposed a conflict. An unavailable GitHub check stays in **Verifying**.

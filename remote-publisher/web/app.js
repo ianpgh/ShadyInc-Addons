@@ -11,6 +11,7 @@ const publicationLabels = {
   verifying: "Verifying",
   published: "Successfully Published",
   partial: "Partially Published",
+  syncing: "Published · Syncing website",
   failed: "Confirmed Failure"
 };
 
@@ -66,8 +67,14 @@ async function request(path, settings) {
     throw new Error("Session expired.");
   }
   if (response.status === 204) return;
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Request failed.");
+  let result;
+  try { result = await response.json(); }
+  catch (_) { throw new Error("Service returned HTTP " + response.status + " without a valid response."); }
+  if (!response.ok) {
+    const error = new Error(result.error || "Request failed (HTTP " + response.status + ").");
+    error.httpStatus = response.status;
+    throw error;
+  }
   return result;
 }
 
@@ -138,6 +145,7 @@ function render() {
     const tone = item.error || item.status === "failed" ? "error" : item.download ? "good" : "warn";
     const status = text("p", item.message, tone);
     row.append(status);
+    if (item.publishError) row.append(text("p", "Last publish response: " + item.publishError, "warn"));
     if (item.preview) {
       const review = item.preview;
       heading.textContent = review.name + " · " + review.version;
@@ -159,7 +167,8 @@ function render() {
       actions.append(button(item.publication ? "Retry · Validate Again" : "Validate Package", () => run(() => validate(item)), busy));
     }
     actions.append(button("Remove From Queue", () => {
-      queue.splice(queue.indexOf(item), 1);
+      const index = queue.indexOf(item);
+      if (index !== -1) queue.splice(index, 1);
       render();
     }, busy));
     row.append(actions);
@@ -183,7 +192,8 @@ async function validate(item) {
   item.preview = null;
   render();
   try {
-    item.preview = await api("validate", item.file, {"X-Release-Channel": item.channel});
+    item.preview = await api("validate", item.file, {"X-Release-Channel": item.channel}, 180000);
+    item.publishError = "";
     if (item.preview.alreadyPublished) {
       item.publication = reference(item.preview);
       await verify(item, true);
@@ -215,7 +225,7 @@ function updatePublication(item, status, detail) {
 }
 
 async function verify(item, automatic = false, publishError = "") {
-  const delays = automatic ? [0, 2000, 5000, 8000] : [0, 2000];
+  const delays = automatic ? [0, 3000, 8000, 15000, 25000] : [0, 3000];
   let absent = 0;
   item.error = false;
   for (const [index, delay] of delays.entries()) {
@@ -258,6 +268,41 @@ async function verify(item, automatic = false, publishError = "") {
   }
 }
 
+function errorDetail(error) {
+  if (error.name === "AbortError") return "Request timed out; GitHub status must be checked.";
+  if (error instanceof TypeError) return "Network connection interrupted: " + error.message;
+  return error.message || "Unknown publication response.";
+}
+
+async function stagedPublish(item) {
+  const ticket = item.preview.ticket;
+  let start;
+  try {
+    start = await api("start-publish", {ticket}, {"X-Release-Confirmation": "publish"}, 30000);
+  } catch (error) {
+    if (error.httpStatus === 409) throw error;
+    item.publishError = errorDetail(error);
+  }
+  // A lost start response may still mean the job was accepted. Poll the same ticket,
+  // never submit a second independent write while the result is uncertain.
+  for (let i = 0; i < 100 && session; i++) {
+    if (i) await new Promise(resolve => setTimeout(resolve, 3000));
+    let status;
+    try { status = await api("publish-status", {ticket}, {}, 20000); }
+    catch (error) { item.publishError = errorDetail(error); continue; }
+    if (status.status === "unknown") {
+      if (i < 3 && !start) continue;
+      throw new Error("Publish job could not be located. Verify before retrying.");
+    }
+    if (status.status === "finished") {
+      if (status.error) throw new Error(status.error);
+      return status.result;
+    }
+    updatePublication(item, "publishing", "Server is processing the validated ZIP. No second upload needed.");
+  }
+  throw new Error("Publish job still unconfirmed. Verify before retrying.");
+}
+
 async function publish(all) {
   const items = queue.filter(item => item.preview && !item.publication && !item.error && (all || item.selected));
   const summary = items.map(item => {
@@ -268,20 +313,23 @@ async function publish(all) {
   for (const [index, item] of items.entries()) {
     if (!session) break;
     item.publication = reference(item.preview);
-    updatePublication(item, "publishing", "Uploading ZIP and saving to GitHub (" + (index + 1) + " of " + items.length + ").");
-    let publishError = "";
+    updatePublication(item, "publishing", "Saving validated ZIP to GitHub (" + (index + 1) + " of " + items.length + ").");
+    item.publishError = "";
     try {
-      const receipt = await api("publish", item.file, {
-        "X-Validation-Ticket": item.preview.ticket, "X-Release-Confirmation": "publish"
-      }, 150000);
+      const receipt = await stagedPublish(item);
       if (receipt.status === "verification_pending") item.commit = receipt.link;
-      if (receipt.status === "push_unconfirmed") publishError = "GitHub did not acknowledge the push attempts.";
+      if (receipt.status === "push_unconfirmed") item.publishError = "GitHub did not acknowledge the push attempts.";
     } catch (error) {
-      if (error.name !== "AbortError" && !(error instanceof TypeError) && !(error instanceof SyntaxError)) {
-        publishError = error.message;
+      item.publishError = errorDetail(error);
+      if (error.httpStatus === 409 && /Staged ZIP expired/.test(error.message)) {
+        item.publication = null;
+        await validate(item);
+        if (!item.publication && !item.error) item.message = "✓ Revalidated after expiry · confirm publication again";
+        render();
+        continue;
       }
     }
-    if (session) await verify(item, true, publishError);
+    if (session) await verify(item, true, item.publishError);
   }
   if (session) await refresh();
 }

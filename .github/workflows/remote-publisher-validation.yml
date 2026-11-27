@@ -1,7 +1,7 @@
 name: Remote Publisher validation
 on:
   push:
-    branches: ['feature/shady-remote-publisher-v1.2']
+    branches: ['feature/shady-remote-publisher-v1.2', 'feature/shady-remote-publisher-v1.2.1']
 permissions:
   contents: read
 jobs:

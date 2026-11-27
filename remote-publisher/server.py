@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
-from threading import BoundedSemaphore, Lock
+from threading import BoundedSemaphore, Lock, Thread
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -42,7 +42,12 @@ REPO_OPERATION = BoundedSemaphore(2)
 WRITER = Lock()
 SHA = re.compile(r"[0-9a-f]{40}")
 CHECKSUM = re.compile(r"[0-9a-f]{64}")
-VERSION = "1.2.0"
+VERSION = "1.2.1"
+STAGED = {}
+JOBS = {}
+STAGE_TTL = 1800
+STAGE_LIMIT = 64 * 1024 * 1024
+JOB_TTL = 3600
 COMMIT_URL = "https://github.com/ianpgh/ShadyInc-Addons/commit/"
 
 
@@ -124,6 +129,15 @@ class Handler(BaseHTTPRequestHandler):
             for key, value in list(table.items()):
                 if value["expires"] <= now:
                     table.pop(key)
+
+    def prune_uploads(self):
+        now = time.monotonic()
+        for key, entry in list(STAGED.items()):
+            if entry["expires"] <= now:
+                STAGED.pop(key, None)
+        for key, entry in list(JOBS.items()):
+            if entry["status"] != "running" and entry["expires"] <= now:
+                JOBS.pop(key, None)
 
     def require_active(self, session):
         active = self.session()
@@ -259,6 +273,7 @@ class Handler(BaseHTTPRequestHandler):
         selected = self.headers.get("X-Release-Channel", "auto")
         data = self.read_body(LIMIT, "application/zip")
         package = inspect(data, selected)
+        audit("validate", "zip_checked", addon=package["addon"], version=package["version"], size=len(data))
         with checkout() as work:
             state = publication_state(work, release_reference(package), CHANNELS[package["channel"]])
             if complete(state):
@@ -269,7 +284,12 @@ class Handler(BaseHTTPRequestHandler):
             if len(session["tickets"]) >= 50:
                 session["tickets"].pop(next(iter(session["tickets"])))
             session["tickets"][ticket] = (package["sha256"], selected, result["current"], result["publicStable"])
-        return {**result, "ticket": ticket}
+            self.prune_uploads()
+            while STAGED and sum(len(entry["data"]) for entry in STAGED.values()) + len(data) > STAGE_LIMIT:
+                STAGED.pop(next(iter(STAGED)))
+            STAGED[ticket] = {"data": data, "expires": time.monotonic() + STAGE_TTL}
+        audit("validate", "staged", addon=package["addon"], version=package["version"])
+        return {**result, "ticket": ticket, "staged": True}
 
     def receipt(self, fields, filename, sha, pushed):
         response = {"addon": fields.get("addon", fields.get("manager")), "version": fields["version"],
@@ -287,20 +307,25 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             WRITER.release()
 
-    def publish_locked(self, session):
-        data = self.read_body(LIMIT, "application/zip")
-        ticket = self.headers.get("X-Validation-Ticket", "")
+    def publish_locked(self, session, data=None, ticket=None):
+        if data is None:
+            data = self.read_body(LIMIT, "application/zip")
+        if ticket is None:
+            ticket = self.headers.get("X-Validation-Ticket", "")
         with GUARD:
             binding = session["tickets"].get(ticket)
             require(binding and hmac.compare_digest(binding[0], digest(data)),
                     "Validate these exact ZIP bytes before publishing.")
             session["tickets"].pop(ticket)
+            STAGED.pop(ticket, None)
         package = inspect(data, binding[1])
         fields = release_reference(package)
         filename = CHANNELS[package["channel"]]
         context = {"addon": package["addon"], "version": package["version"], "channel": package["channel"]}
         sha = None
+        audit("publish", "zip_checked", size=len(data), **context)
         for attempt in (1, 2, 3):
+            audit("publish", "checkout_started", attempt=attempt, **context)
             with checkout() as work:
                 state = publication_state(work, fields, filename)
                 if complete(state):
@@ -313,13 +338,77 @@ class Handler(BaseHTTPRequestHandler):
                 require((review["current"], review["publicStable"]) == binding[2:] or state["metadata"],
                         "The reviewed channel changed. Validate the package again.")
                 paths = apply(work, package, data, resume=True)[1]
+                audit("publish", "authorization_check", attempt=attempt, **context)
                 self.require_active(session)
+                audit("publish", "push_started", attempt=attempt, **context)
                 sha, pushed = commit_push(work, paths, f"Publish {package['addon']} {package['version']}", session["token"])
                 if pushed:
                     return self.receipt(fields, filename, sha, True)
             audit("publish", "push_response_unconfirmed", sha=sha, attempt=attempt, **context)
             time.sleep(1)
         return self.receipt(fields, filename, sha, False)
+
+    def start_publish(self, session):
+        require(self.headers.get("X-Release-Confirmation") == "publish", "Explicit publish confirmation required.")
+        payload = json.loads(self.read_body(4096, "application/json"))
+        ticket = payload.get("ticket", "")
+        require(isinstance(ticket, str) and len(ticket) <= 128, "Invalid validation ticket.")
+        # Job identity is the validated ticket, bound to the authenticated session.
+        owner = session["csrf"]
+        with GUARD:
+            self.prune_uploads()
+            existing = JOBS.get(ticket)
+            if existing and hmac.compare_digest(existing["owner"], owner):
+                return {"job": ticket, "status": existing["status"]}
+            stage = STAGED.get(ticket)
+            require(ticket in session["tickets"] and stage, "Staged ZIP expired. Validate the package again.")
+            require(len(JOBS) < 100, "Publisher job capacity reached. Retry shortly.")
+            require(REPO_OPERATION.acquire(blocking=False), "Publisher is busy. Retry shortly.")
+            if not WRITER.acquire(blocking=False):
+                REPO_OPERATION.release()
+                raise Rejected("Another repository write is in progress. Retry shortly.")
+            data = stage["data"]
+            JOBS[ticket] = {"owner": owner, "status": "running", "expires": time.monotonic() + JOB_TTL}
+        try:
+            Thread(target=self.publish_worker, args=(session, data, ticket), daemon=True).start()
+        except BaseException:
+            with GUARD:
+                JOBS.pop(ticket, None)
+            WRITER.release()
+            REPO_OPERATION.release()
+            raise
+        audit("publish", "job_accepted", size=len(data))
+        return {"job": ticket, "status": "running"}
+
+    def publish_worker(self, session, data, ticket):
+        result = None
+        error = None
+        try:
+            result = self.publish_locked(session, data, ticket)
+        except Rejected as exc:
+            error = str(exc)
+            audit("publish", "job_rejected", detail=error)
+        except Exception as exc:
+            error = "Publication interrupted (" + type(exc).__name__ + "). Verify before retrying."
+            audit("publish", "job_interrupted", error=type(exc).__name__)
+        finally:
+            with GUARD:
+                entry = JOBS[ticket]
+                entry.update(status="finished", result=result, error=error,
+                             expires=time.monotonic() + JOB_TTL)
+            WRITER.release()
+            REPO_OPERATION.release()
+
+    def publish_status(self, session):
+        payload = json.loads(self.read_body(4096, "application/json"))
+        ticket = payload.get("ticket", "")
+        require(isinstance(ticket, str) and len(ticket) <= 128, "Invalid job reference.")
+        with GUARD:
+            self.prune_uploads()
+            entry = JOBS.get(ticket)
+            if not entry or not hmac.compare_digest(entry["owner"], session["csrf"]):
+                return {"status": "unknown"}
+            return {key: value for key, value in entry.items() if key in ("status", "result", "error")}
 
     def verification_reference(self):
         data = json.loads(self.read_body(4096, "application/json"))
@@ -385,7 +474,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             download = verify_public(addon, filename, state["live"], sha, catalog_required=True)
         except Rejected as exc:
-            return result("partial", f"GitHub has the file and metadata. {exc} Use Verify Publication to recheck the download.",
+            return result("syncing", f"GitHub has the file and metadata. {exc} Use Verify Publication to recheck the download.",
                           sha=sha, link=COMMIT_URL + sha, retryable=False)
         return result("published", "GitHub metadata and the public download checksum match.",
                       sha=sha, link=COMMIT_URL + sha, download=download)
@@ -467,11 +556,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlsplit(self.path).path
         try:
+            if path in {"/api/publish", "/api/start-publish", "/api/validate"}:
+                audit(path, "request_received")
             session = self.session()
             if not session:
+                audit(path, "authentication_required")
                 return self.json(401, {"error": "Sign in again to continue."})
             if (self.headers.get("Origin") != ORIGIN or
                     not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), session["csrf"])):
+                audit(path, "origin_or_csrf_rejected")
                 return self.json(403, {"error": "Invalid request origin or session proof."})
             if path == "/api/logout":
                 if STORE is not None:
@@ -481,12 +574,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(204, Set_Cookie="__Host-session=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0")
             routes = {"/api/validate": lambda: self.validate(session), "/api/publish": lambda: self.publish(session),
                       "/api/check": self.check, "/api/verify-publication": self.verify_publication,
-                      "/api/rollback": lambda: self.rollback(session)}
+                      "/api/rollback": lambda: self.rollback(session),
+                      "/api/start-publish": lambda: self.start_publish(session),
+                      "/api/publish-status": lambda: self.publish_status(session)}
             if path not in routes:
                 return self.json(404, {"error": "Unknown endpoint."})
             result = routes[path]()
         except Rejected as exc:
-            if path in {"/api/publish", "/api/rollback", "/api/verify-publication"}:
+            if path in {"/api/publish", "/api/start-publish", "/api/validate", "/api/rollback", "/api/verify-publication"}:
                 audit(path, "rejected", detail=str(exc))
             return self.json(409, {"error": str(exc)})
         except CHECK_ERRORS as exc:

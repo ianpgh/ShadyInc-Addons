@@ -296,7 +296,7 @@ class RepositoryTests(unittest.TestCase):
                 self.assertTrue(pushed)
             public.side_effect = pub.Rejected("GitHub Pages: version metadata differs.")
             partial = handler.verify_publication()
-            self.assertEqual(partial["status"], "partial")
+            self.assertEqual(partial["status"], "syncing")
             self.assertFalse(partial["retryable"])
             self.assertIn("GitHub Pages", partial["detail"])
             public.side_effect = None
@@ -394,6 +394,35 @@ class HTTPTests(unittest.TestCase):
         with patch.object(server, "ORIGIN", origin), patch.object(server, "checkout", side_effect=TimeoutError):
             with urlopen(Request(path, identity, headers)) as response:
                 self.assertEqual(json.load(response)["status"], "verifying")
+
+    def test_staged_job_is_session_bound_and_idempotent(self):
+        handler = server.Handler.__new__(server.Handler)
+        handler.headers = {"X-Release-Confirmation": "publish"}
+        handler.read_body = Mock(return_value=b'{"ticket":"fixture-staged-ticket"}')
+        ticket = "fixture-staged-ticket"
+        session = {"csrf": "owner-a", "tickets": {ticket: ("digest", "auto", None, None)}}
+        server.STAGED[ticket] = {"data": b"zip", "expires": time.monotonic() + 30}
+        self.addCleanup(server.STAGED.pop, ticket, None)
+        self.addCleanup(server.JOBS.pop, ticket, None)
+        with patch.object(server, "Thread") as thread:
+            self.assertEqual(handler.start_publish(session)["job"], ticket)
+            try:
+                self.assertEqual(handler.start_publish(session)["status"], "running")
+                thread.assert_called_once()
+                self.assertEqual(handler.publish_status({"csrf": "other"})["status"], "unknown")
+                self.assertEqual(handler.publish_status(session)["status"], "running")
+            finally:
+                with patch.object(handler, "publish_locked", return_value={"status": "verification_pending"}):
+                    handler.publish_worker(session, b"zip", ticket)
+        self.assertEqual(handler.publish_status(session)["result"]["status"], "verification_pending")
+
+    def test_expired_stage_requires_revalidation(self):
+        handler = server.Handler.__new__(server.Handler)
+        handler.headers = {"X-Release-Confirmation": "publish"}
+        handler.read_body = Mock(return_value=b'{"ticket":"expired-ticket"}')
+        server.STAGED["expired-ticket"] = {"data": b"zip", "expires": time.monotonic() - 1}
+        with self.assertRaisesRegex(pub.Rejected, "Staged ZIP expired"):
+            handler.start_publish({"csrf": "owner", "tickets": {"expired-ticket": ("x", "auto", None, None)}})
 
     def test_interrupted_upload_rejected_before_validation(self):
         handler = server.Handler.__new__(server.Handler)
