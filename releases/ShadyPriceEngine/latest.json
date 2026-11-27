@@ -1,6 +1,7 @@
 {
   "addon": "ShadyPriceEngine",
-  "version": "1.2.15",
-  "url": "ShadyPriceEngine_v1.2.15.zip",
-  "sha256": "9e90fc5ead6c2238df35c922c314961d84484febfa653ce75319cda0a61d33c1"
+  "published_at": "2026-11-27T23:34:06Z",
+  "sha256": "e5a507f19f19cc107aa50f5bd10f247b7da445ef2ddc1b217185c121fb4f4e9e",
+  "url": "ShadyPriceEngine_v1.2.17.zip",
+  "version": "1.2.17"
 }
