@@ -214,5 +214,12 @@
     "category": "Utility",
     "description": "Alt-middle-click to track; Shift-middle-click to hide; middle-click to disenchant; Shift-left-click to link, search or delete; Show Hidden count, right-click highlight color/intensity.",
     "features": []
+  },
+  {
+    "category": "Utility",
+    "description": "Personal honorable kills and PvP killing blows.",
+    "features": [],
+    "id": "ShadyKillTracker",
+    "name": "Shady Kill Tracker"
   }
 ]
